@@ -37,6 +37,8 @@ const DICE_CALL_TIME := 2.0  # after this many seconds, creeping dice are called
 const HOME_X := 5.15
 const DRAG_LEAN_CM := 5.0   # how far the human leans in while carrying a stone with the mouse
 const HOME_SIZE := Vector2(1.7, 2.8)  # home plate (x, z); finished stones sit on it side by side
+const BOWL_POS := Vector3(4.3, -0.04, -4.55)   # Al-Khasm's bowl of dates, behind his home plate
+const DATES := 12                              # how many dates are in it: when they are gone, they are gone
 
 enum Phase { ROLL, MOVE, BUSY, OVER }
 
@@ -91,6 +93,7 @@ var die_cool: Array = [0.0, 0.0, 0.0, 0.0]
 const SFX_DB := {
 	"die_wall": -3.0, "die_floor": -2.0, "die_die": -7.0, "dice_shake": -5.0,
 	"stone_place": -4.0, "stone_stone": -4.0, "stone_lift": -22.0, "stone_slide": -8.0,
+	"date_pick": -20.0, "pit_drop": -15.0,
 }
 
 const DIE_SHADER := """
@@ -200,7 +203,8 @@ void fragment() {
 const SAND_SHADER := """
 shader_type spatial;
 // Desert sand the board rests on (rects = centre.xz, half-size.xz, rect_cs = cos/sin of
-// each one's yaw, rect_top = height of each object's top). Nothing just sits on sand: the
+// each one's yaw, rect_top = height of each object's top; a round object has w < 0 and
+// its radius in z). Nothing just sits on sand: the
 // wind banks it up against every edge, in uneven drifts that are deeper and run further
 // out on the side facing the wind, and scours a shallow hollow in the lee. Where the
 // drifted sand meets the wood or clay there is a dark crease, and the drift itself is
@@ -237,9 +241,12 @@ vec4 nearest(vec2 p) {
 		q = vec2(q.x * cs.x - q.y * cs.y, q.x * cs.y + q.y * cs.x);   // into its own frame
 		vec2 d = abs(q) - rects[i].zw;
 		float dist = length(max(d, 0.0)) + min(max(d.x, d.y), 0.0);
+		bool round_one = rects[i].w < 0.0;     // a round thing (the bowl): radius in z
+		if (round_one) dist = length(q) - rects[i].z;
 		if (dist < best.x) {
 			vec2 nl = d.x > d.y ? vec2(sign(q.x), 0.0) : vec2(0.0, sign(q.y));
 			if (d.x > 0.0 && d.y > 0.0) nl = normalize(d * sign(q));
+			if (round_one) nl = q / max(length(q), 1e-4);
 			best = vec4(dist, nl.x * cs.x + nl.y * cs.y, -nl.x * cs.y + nl.y * cs.x, rect_top[i]);
 		}
 	}
@@ -323,6 +330,7 @@ func _ready() -> void:
 	ui_font.font_weight = 700
 	build_environment()
 	build_board()
+	build_bowl()
 	build_tray()
 	build_pieces()
 	build_dice()
@@ -787,6 +795,13 @@ func build_board() -> void:
 		add_slab(HOME_SIZE, plate_xf(p), slab_mat, panel_mat("plate"), "plate", yaw)
 
 
+## Al-Khasm's bowl of dates, on the sand behind his home plate (on his left).
+func build_bowl() -> void:
+	bowl = DateBowl.new(DATES)
+	bowl.position = BOWL_POS
+	add_child(bowl)
+
+
 ## Sand ground, mounded against the board pieces and the dice tray.
 func build_sand() -> void:
 	var sm := ShaderMaterial.new()
@@ -804,15 +819,16 @@ func build_sand() -> void:
 		Vector4(plate_xf(AI).origin.x, plate_xf(AI).origin.z, HOME_SIZE.x / 2, HOME_SIZE.y / 2),
 		Vector4(tc.x, tc.z, TRAY.size.x / 2 + 0.3, TRAY.size.y / 2 + 0.3),                  # dice tray
 		Vector4(TABLET_POS.x, TABLET_POS.z, TABLET_SIZE.x / 2 - 0.05, TABLET_SIZE.z / 2 - 0.1),  # clay tablet
+		Vector4(BOWL_POS.x, BOWL_POS.z, 3.5 * DateBowl.CM, -1.0),                          # the bowl of dates (round)
 	])
 	var rots := PackedFloat32Array([BOARD_YAW, STRIP_PLACE[HUMAN].z, STRIP_PLACE[AI].z,
-		PLATE_NUDGE[HUMAN].z, PLATE_NUDGE[AI].z, TRAY_NUDGE.z, 4.0])
+		PLATE_NUDGE[HUMAN].z, PLATE_NUDGE[AI].z, TRAY_NUDGE.z, 4.0, 0.0])
 	var cs := PackedVector2Array()
 	for r in rots:
 		cs.append(Vector2(cos(deg_to_rad(r)), sin(deg_to_rad(r))))
 	sm.set_shader_parameter("rects", rects)
 	sm.set_shader_parameter("rect_cs", cs)
-	sm.set_shader_parameter("rect_top", PackedFloat32Array([BY, BY, BY, BY, BY, TRAY_RIM_H, TABLET_POS.y + 0.06]))
+	sm.set_shader_parameter("rect_top", PackedFloat32Array([BY, BY, BY, BY, BY, TRAY_RIM_H, TABLET_POS.y + 0.06, 0.16]))
 	sm.set_shader_parameter("rect_count", rects.size())
 	sm.set_shader_parameter("wind", SAND_WIND)
 	var mi := MeshInstance3D.new()
@@ -1527,10 +1543,23 @@ func start_turn() -> void:
 	if game.current == HUMAN:
 		phase = Phase.ROLL
 		set_status("Your turn\ncast the dice in the tray")
+		# while you think, he may help himself to a date
+		snack_while_waiting(e)
 	else:
 		phase = Phase.BUSY
 		set_status("Al-Khasm's turn")
 		await get_tree().create_timer(0.7).timeout
+		if e != epoch:
+			return
+		# he may take a date first; if he is already eating one, he finishes it before playing
+		if eating:
+			await ate
+		elif may_snack(0.3):
+			await eat_date()
+		else:
+			do_roll()
+			return
+		await get_tree().create_timer(randf_range(0.3, 0.6)).timeout
 		if e != epoch:
 			return
 		do_roll()
@@ -1679,6 +1708,306 @@ func perform_move(idx: int) -> void:
 	start_turn()
 
 
+# ======================================================================
+# Al-Khasm's dates
+# ======================================================================
+
+## Whether he takes a date now, with the given chance: only if there are any left, his
+## left hand is free and he has not just had one.
+func may_snack(chance: float) -> bool:
+	if not snack_ok or left_busy or bowl.remaining() == 0:
+		return false
+	if Time.get_ticks_msec() / 1000.0 - last_eat < 9.0:
+		return false
+	return randf() < chance * snack_rate
+
+
+## On your turn he may reach for a date while he waits for you.
+func snack_while_waiting(e: int) -> void:
+	await get_tree().create_timer(randf_range(1.2, 4.5)).timeout
+	if e != epoch or game.current != HUMAN or not (phase == Phase.ROLL or phase == Phase.MOVE):
+		return
+	if may_snack(0.35):
+		eat_date()
+
+
+## Move his left hand's grip to `to` over dur seconds (eased), arcing up by `arc`, its
+## fingers turning to point along fwd and tipping to `pitch` degrees on the way. Not one
+## of the game's tweens: a new game does not stop him eating.
+func lh_move(h: UrHand, to: Vector3, dur: float, arc: float, pitch: float, fwd: Vector3) -> void:
+	h.move_id += 1
+	var my := h.move_id
+	var from := h.grip_target
+	var p0 := h.aim_pitch
+	var f0 := Vector3(h.aim_fwd.x, 0.0, h.aim_fwd.z).normalized()
+	var f1 := Vector3(fwd.x, 0.0, fwd.z).normalized()
+	var turn := f0.signed_angle_to(f1, Vector3.UP)
+	var tw := create_tween()
+	tw.tween_method(func(t: float) -> void:
+		if h.move_id != my:
+			return
+		var g := from.lerp(to, t) + Vector3(0, sin(t * PI) * arc, 0)
+		h.place(g, f0.rotated(Vector3.UP, turn * t), lerpf(p0, pitch, t), h.aim_roll),
+		0.0, 1.0, dur).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+	await tw.finished
+
+
+## Where thumb and fingers meet on a date (hand-local cm): as on a stone on the board.
+func pinch_point(_pitch: float) -> Vector3:
+	return UrHand.GRASP_C
+
+
+## Thumb, index and middle finger pinching something of half-width r with the hand tipped
+## `pitch` degrees, their pads meeting across it level (so as they open and close they
+## stay at its middle height); the ring and little finger hang loosely curled (not tucked
+## tight into the palm, as for a stone on the board: in a bowl they would catch the lip).
+var date_poses := {}
+func date_pose(h: UrHand, r: float, pitch: float) -> Dictionary:
+	var key := "%.2f_%.0f" % [r, pitch]
+	if date_poses.has(key):
+		return date_poses[key]
+	var d: Dictionary = h.grasp_level(r, pitch).duplicate()
+	var loose := {"ring": [40.0, 52.0, 28.0, -3.0], "pinky": [44.0, 56.0, 30.0, -7.0]}
+	for f in loose:
+		var v: Array = loose[f]
+		d[h.bones[f + "_0"]] = Vector2(v[0], v[3])
+		d[h.bones[f + "_1"]] = Vector2(v[1], 0.0)
+		d[h.bones[f + "_2"]] = Vector2(v[2], 0.0)
+	date_poses[key] = d
+	return d
+
+
+## The way across a date (horizontal, world) on his side of it.
+func date_across(h: UrHand, d: Node3D) -> Vector3:
+	var nat := d.global_position - h.shoulder
+	nat.y = 0.0
+	nat = nat.normalized()
+	var ax := d.global_transform.basis.z
+	ax.y = 0.0
+	if ax.length() < 0.01:
+		return nat
+	ax = ax.normalized()
+	var across := Vector3(-ax.z, 0.0, ax.x)
+	return across if across.dot(nat) >= 0.0 else -across
+
+
+## Before he reaches, the hand works out how: which of the dates lying free on top, the
+## fingers turned which way and tipped how steeply, so that coming straight down onto it,
+## open, and closing on it, nothing of the hand (or the sleeve) touches the clay, and the
+## fingers push as little as possible into the dates round it (least of all the ones
+## underneath, which cannot give way). He likes to take a date across its middle, thumb
+## on one side and fingers on the other, with the wrist turned no more than it must from
+## the way his arm reaches; by a wall he turns it more, or comes down steeper, or takes
+## the date slantwise (wider between thumb and fingers). Spread over a few frames.
+func plan_date(h: UrHand) -> Dictionary:
+	var cands := bowl.candidates(bowl.global_position - h.shoulder, 7)
+	var n := 0
+	h.grip_override = UrHand.GRASP_C
+	# (tried out unseen, and without being pushed out of the clay: that is what is measured)
+	var solid := h.solid
+	h.solid = Callable()
+	# first, quickly, every way: the hand closed on the date, as it is, fingers unbent
+	var tries: Array = []
+	for d in cands:
+		var c: Vector3 = d.global_position
+		var nat := c - h.shoulder
+		nat.y = 0.0
+		nat = nat.normalized()
+		var across := date_across(h, d)
+		var half: Vector2 = bowl.date_half(d)        # (across, along) in cm
+		for k in 7:
+			var turn := (k - 3) * 0.3
+			var fwd := nat.rotated(Vector3.UP, turn)
+			# how slantwise that takes the date: 0 straight across, 90 degrees end to end
+			var slant := acos(clampf(absf(fwd.dot(across)), 0.0, 1.0))
+			var half_w := Vector2(half.x * cos(slant), half.y * sin(slant)).length()
+			for pitch: float in [26.0, 34.0, 42.0]:
+				h.set_pose_dict(date_pose(h, half_w * 0.9, pitch), true)
+				for lift_cm: float in [0.0, 0.6]:
+					var g := c + Vector3(0, lift_cm * DateBowl.CM, 0)
+					h.place(g, fwd, pitch)
+					var parts: Vector2 = bowl.hand_clear_parts(h.global_transform, h)   # (fingers, the rest)
+					var crowd := bowl.date_crowding(h.global_transform, h, d, c.y / DateBowl.CM - 0.3)
+					var score: float = -0.3 * crowd - 0.7 * absf(turn) - 1.2 * slant - 0.6 * lift_cm + randf() * 0.2
+					score -= 2.0 * maxf(-parts.x / DateBowl.CM, 0.0)               # fingers that will have to bend
+					if parts.y < -0.05 * DateBowl.CM:
+						score -= 100.0 + 300.0 * (-0.05 * DateBowl.CM - parts.y) / DateBowl.CM
+					tries.append({"score": score, "date": d, "fwd": fwd, "pitch": pitch, "half_w": half_w, "grip": g,
+						"crowd": crowd, "c": c})
+					n += 1
+					if n % 24 == 0:
+						await get_tree().process_frame
+	tries.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return float(a.score) > float(b.score))
+	# then the best few properly: open above it and closing as it comes down the last
+	# little way onto it, the fingers giving way where they meet the clay or a date
+	var best := {}
+	for t in tries.slice(0, 10):
+		var g: Vector3 = t.grip
+		var fwd: Vector3 = t.fwd
+		var pitch: float = t.pitch
+		var half_w: float = t.half_w
+		var clear := 1e9
+		h.set_pose_dict(date_pose(h, half_w + 1.3, pitch), true)
+		for j in [3, 2, 1]:
+			h.place(g + Vector3(0, 0.35 * j, 0), fwd, pitch)
+			bowl.conform(h.global_transform, h)
+			clear = minf(clear, bowl.hand_clear(h.global_transform, h))
+		h.set_pose_dict(date_pose(h, half_w + 0.5, pitch), true)
+		h.place(g + Vector3(0, 0.15, 0), fwd, pitch)
+		bowl.conform(h.global_transform, h)
+		clear = minf(clear, bowl.hand_clear(h.global_transform, h))
+		h.set_pose_dict(date_pose(h, half_w * 0.9, pitch), true)
+		h.place(g, fwd, pitch)
+		bowl.conform(h.global_transform, h)
+		clear = minf(clear, bowl.hand_clear(h.global_transform, h))
+		var score: float = t.score
+		# fingertips may rest on the clay; never press into it
+		if clear < -0.05 * DateBowl.CM:
+			score -= 100.0 + 300.0 * (-0.05 * DateBowl.CM - clear) / DateBowl.CM
+		t["clear"] = clear
+		t["score"] = score
+		if best.is_empty() or score > float(best.score):
+			best = t
+		await get_tree().process_frame
+	h.set_pose("relaxed", true)
+	h.solid = solid
+	return best
+
+
+## He reaches into the bowl at his left, takes a date and lifts it away to his mouth. Back
+## when the date is gone from view (his game can go on); the stone comes out later.
+## Everything is solid: his hand comes down over the clay, never into it; his fingers
+## push the dates beside the one he takes out of their way, and when it comes out the
+## others slump into the gap it leaves.
+func eat_date() -> void:
+	if left_busy or bowl.remaining() == 0:
+		return
+	eating = true
+	left_busy = true
+	var h := lhand
+	var plan: Dictionary = await plan_date(h)
+	if plan.is_empty():
+		eating = false
+		left_busy = false
+		ate.emit()
+		return
+	var d: Node3D = plan.date
+	var grip_at: Vector3 = plan.grip
+	bowl.spare_date = d
+	if OS.get_environment("PLAN_LOG") != "":
+		print("plan: clear %.2f cm, crowd %.2f, pitch %.0f, score %.2f" % [float(plan.clear) / DateBowl.CM, plan.crowd, plan.pitch, plan.score])
+	bowl.hold_still(d, true)        # lying in the heap, it does not go anywhere by itself
+	var c := d.global_position
+	var fwd: Vector3 = plan.fwd
+	var pitch: float = plan.pitch
+	var half_w: float = plan.half_w
+	# in from beyond his shoulder, fingers and thumb opening as the hand comes over the bowl
+	h.set_pose("relaxed", true)
+	h.aim_yaw = 0.0
+	h.aim_roll = 0.0
+	h.grip_override = pinch_point(pitch)
+	h.place(offstage(h, c), fwd, 10.0)
+	h.visible = true
+	h.set_pose_dict(date_pose(h, half_w + 1.3, pitch))
+	await lh_move(h, grip_at + Vector3(0, 1.3, 0), randf_range(0.75, 0.95), 0.6, pitch, fwd)
+	# down among them, slowing as it goes in: from here on the hand is solid to the dates
+	bowl.set_hand_solid(true, d)
+	await lh_move(h, grip_at + Vector3(0, 0.35, 0), randf_range(0.3, 0.38), 0.0, pitch, fwd)
+	# closing round it as the hand settles onto it
+	h.pose_rate = 7.0
+	h.set_pose_dict(date_pose(h, half_w + 0.5, pitch))
+	await lh_move(h, grip_at, randf_range(0.3, 0.38), 0.0, pitch, fwd)
+	# the fingers close on it; it is soft, and gives a little
+	h.pose_rate = 12.0
+	h.set_pose_dict(date_pose(h, half_w * 0.9, pitch))
+	await get_tree().create_timer(randf_range(0.2, 0.28)).timeout
+	play_sfx("date_pick", c)
+	h.pose_rate = 9.0
+	bowl.remove(d)
+	var rel := h.global_transform.affine_inverse() * d.global_transform
+	d.reparent(self)
+	var follow := func() -> void: d.global_transform = h.global_transform * rel
+	h.placed.connect(follow)
+	bowl.stir()
+	# drawn up out of the heap (slowly at first: it is a little stuck to the others), then
+	# clear of the bowl, then away to his mouth
+	await lh_move(h, grip_at + Vector3(0, 0.35, 0), randf_range(0.3, 0.38), 0.0, pitch, fwd)
+	await lh_move(h, grip_at + Vector3(0, 1.6, 0), randf_range(0.3, 0.4), 0.0, pitch, fwd)
+	bowl.set_hand_solid(false)
+	var to_mouth := MOUTH - c
+	await lh_move(h, MOUTH, randf_range(0.85, 1.05), 0.8, -15.0, to_mouth)
+	h.placed.disconnect(follow)
+	d.queue_free()
+	h.visible = false
+	h.grip_override = null
+	last_eat = Time.get_ticks_msec() / 1000.0
+	eating = false
+	ate.emit()
+	spit_stone()
+
+
+## He chews a while, then his hand comes back with the stone and puts it down on the sand
+## beside the bowl.
+func spit_stone(wait := -1.0) -> void:
+	await get_tree().create_timer(randf_range(chew.x, chew.y) if wait < 0.0 else wait).timeout
+	var h := lhand
+	var spot := bowl.pit_spot()
+	var pit := bowl.make_pit()
+	add_child(pit)
+	var pitch := 38.0
+	var fwd := spot - h.shoulder
+	fwd.y = 0.0
+	h.grip_override = UrHand.GRASP_C
+	h.aim_yaw = 0.0
+	h.aim_roll = 0.0
+	h.set_pose_dict(h.grasp_level(0.42, pitch), true)
+	h.place(offstage(h, spot), fwd, 10.0)
+	h.visible = true
+	# the stone lies across his fingertips, pinched by its middle
+	var rel := Transform3D(Basis(Vector3(0, 0, -1), Vector3(0, 1, 0), Vector3(1, 0, 0)), UrHand.GRASP_C)
+	var follow := func() -> void: pit.global_transform = h.global_transform * rel
+	follow.call()
+	h.placed.connect(follow)
+	await lh_move(h, spot + Vector3(0.1, 1.2, -0.6), randf_range(0.9, 1.1), 0.5, pitch, fwd)
+	await lh_move(h, spot + Vector3(0, 0.4, 0), randf_range(0.3, 0.4), 0.0, pitch, fwd)
+	h.placed.disconnect(follow)
+	h.pose_rate = 16.0
+	h.set_pose_dict(h.grasp_level(1.4, pitch))
+	# it drops to the sand and lies on its side
+	var from := pit.global_transform
+	var rest_b := (Basis(Vector3.UP, randf() * TAU) * Basis(Vector3.BACK, randf_range(-0.6, 0.6) + (PI if randf() < 0.5 else 0.0))) \
+		.scaled(Vector3.ONE * DateBowl.CM)
+	var to := Transform3D(rest_b, spot + Vector3(0, float(pit.get_meta("half_h")) * DateBowl.CM, 0))
+	var tw := create_tween()
+	tw.tween_method(func(t: float) -> void:
+		var q := from.interpolate_with(to, t)
+		q.origin = from.origin.lerp(to.origin, t)
+		q.origin.y = lerpf(from.origin.y, to.origin.y, t * t)
+		pit.global_transform = q, 0.0, 1.0, 0.17)
+	await tw.finished
+	play_sfx("pit_drop", spot)
+	await get_tree().create_timer(0.12).timeout
+	h.pose_rate = 9.0
+	h.set_pose("relaxed")
+	await lh_move(h, offstage(h, spot), randf_range(0.6, 0.8), 0.3, 10.0, fwd)
+	h.visible = false
+	h.grip_override = null
+	left_busy = false
+
+
+## (Tests) He has eaten one: the date is gone and its stone lies by the bowl.
+func eat_instantly() -> void:
+	var d := bowl.take_date()
+	if d == null:
+		return
+	d.queue_free()
+	var pit := bowl.make_pit()
+	add_child(pit)
+	var spot := bowl.pit_spot()
+	var b := (Basis(Vector3.UP, randf() * TAU) * Basis(Vector3.BACK, randf_range(-0.6, 0.6))).scaled(Vector3.ONE * DateBowl.CM)
+	pit.global_transform = Transform3D(b, spot + Vector3(0, float(pit.get_meta("half_h")) * DateBowl.CM, 0))
+
+
 ## A move slides along the board when it stays on the board and every square it
 ## passes over is empty; otherwise the stone has to be lifted.
 ## Is board-local point (x, z) on one of the board's squares (not off the edge, not in the
@@ -1759,6 +2088,18 @@ func can_slide(p: int, src: int, dst: int) -> bool:
 # ======================================================================
 
 var hands: Array = [null, null]
+var bowl: DateBowl
+var lhand: UrHand                   # Al-Khasm's left hand: it takes his dates
+var eating := false                 # he is taking a date to his mouth: his game waits for it
+var left_busy := false              # his left hand is about something (a date, or putting its stone down)
+var snack_ok := true                # (the tests turn his snacking off)
+var snack_rate := 1.0               # (and can make him hungrier)
+var chew := Vector2(16.0, 26.0)     # how long a date takes him, mouth to stone (s): a dried date is
+									# bitten, chewed round the stone, the stone worked clean
+var last_eat := -100.0              # when he last took one (seconds)
+signal ate
+const AI_LEFT_SHOULDER := Vector3(7.4, 4.8, -12.0)
+const MOUTH := Vector3(3.3, 9.4, -10.4)   # where his mouth is, well out of view
 var human_holding := false          # the human's fingers hold the selected stone (dragging)
 var release_pending: Variant = null  # mouse released before the hand had reached the stone
 var drag_target := Vector3.ZERO
@@ -1778,6 +2119,12 @@ func build_hands() -> void:
 	for h in hands:
 		add_child(h)
 		h.solid = grip.hand_push    # the dice tray is wood and leather: hands rest on it
+	# and his left, which only ever goes to the bowl of dates at his left side
+	lhand = UrHand.new(UrHand.Style.BLACK, AI_LEFT_SHOULDER, Vector3(1, 0, 0), true)
+	lhand.lean = 0.3
+	add_child(lhand)
+	lhand.solid = bowl.hand_push    # the clay is solid to it
+	bowl.attach_hand(lhand)         # and it is solid to the dates
 	slide_player = AudioStreamPlayer3D.new()
 	slide_player.attenuation_model = AudioStreamPlayer3D.ATTENUATION_DISABLED
 	slide_player.attenuation_filter_db = 0.0

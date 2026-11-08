@@ -25,8 +25,10 @@ const MAX_LEAN_CM := 26.0        # furthest the shoulder can travel from where h
 enum Style { WHITE, BLACK }
 
 var style: Style
-var shoulder: Vector3            # where the player's right shoulder normally is (world)
-var person_right: Vector3        # the player's right-hand side (world, horizontal)
+var left := false                # a left hand: the right one mirrored (thumb on the other side)
+var shoulder: Vector3            # where this arm's shoulder normally is (world)
+var person_right: Vector3        # the side this arm is on: the player's right for the right hand,
+                                 # his left for the left (world, horizontal); the elbow goes out that way
 var lean := 0.45                 # how far his shoulder follows the hand sideways
 
 var skel: Skeleton3D
@@ -119,7 +121,8 @@ render_mode cull_back;
 // and pale when it bends, the veins fill and stand out as the hand works, and the
 // extensor tendons show on the back of the hand as the fingers straighten.
 uniform vec3 skin_tone = vec3(0.4, 0.25, 0.15);
-uniform int tattoo = 0;          // 0: ankh on the back of the hand; 1: dotted lozenge + wrist band
+uniform int tattoo = 0;          // 0: ankh on the back of the hand; 1: dotted lozenge + wrist band;
+                                 // 2: only three dots in the web of the thumb
 uniform float seed = 0.0;
 uniform int debug_view = 0;      // 1: show the vertex masks, 2: show the region, 3: joint flex, 4: veins/tendons
 uniform float flex[18];          // each bone's current flex (degrees), by skeleton index
@@ -183,7 +186,7 @@ float tattoo_ink(vec2 q) {
 		ink = max(ink, ink_line(seg(q, vec2(0.15, 5.0), vec2(2.05, 5.0)), 0.15));
 		for (int i = 0; i < 3; i++) // three dots beside it
 			ink = max(ink, 1.0 - smoothstep(0.1, 0.2, length(q - vec2(-0.6, 3.4 + float(i) * 0.75))));
-	} else {
+	} else if (tattoo == 1) {
 		// lozenge of dots, the old Nile way, and a band of dots round the wrist
 		vec2 r = q - vec2(0.2, 4.6);
 		if (abs(r.x) + abs(r.y) * 0.8 < 2.4) {
@@ -196,6 +199,12 @@ float tattoo_ink(vec2 q) {
 		if (abs(q.y + 1.3) < 0.25) {
 			float gx = fract(q.x / 0.7) - 0.5;
 			ink = max(ink, 1.0 - smoothstep(0.12, 0.2, length(vec2(gx * 0.7, q.y + 1.3))));
+		}
+	} else if (tattoo == 2) {
+		// three dots in a little triangle in the web of the thumb, done long ago
+		for (int i = 0; i < 3; i++) {
+			vec2 c = vec2(2.6, 5.4) + vec2(float(i % 2) * 0.55 - float(i / 2) * 0.27, float(i / 2) * 0.5);
+			ink = max(ink, 1.0 - smoothstep(0.12, 0.22, length(q - c)));
 		}
 	}
 	return ink;
@@ -928,8 +937,9 @@ void fragment() {
 """
 
 
-func _init(s: Style, shoulder_pos: Vector3, right_dir: Vector3) -> void:
+func _init(s: Style, shoulder_pos: Vector3, right_dir: Vector3, is_left := false) -> void:
 	style = s
+	left = is_left
 	shoulder = shoulder_pos
 	person_right = right_dir.normalized()
 
@@ -1027,8 +1037,9 @@ func build_skin() -> void:
 	var sh := Shader.new()
 	sh.code = SKIN_SHADER
 	mat.shader = sh
-	mat.set_shader_parameter("tattoo", 0 if style == Style.WHITE else 1)
-	mat.set_shader_parameter("seed", 0.0 if style == Style.WHITE else 3.7)
+	mat.set_shader_parameter("tattoo", 0 if style == Style.WHITE else (2 if left else 1))
+	# the same man's other hand: the same skin, but every freckle, scar and crease elsewhere
+	mat.set_shader_parameter("seed", (0.0 if style == Style.WHITE else 3.7) + (5.3 if left else 0.0))
 	mat.set_shader_parameter("skin_tone", Vector3(0.33, 0.19, 0.1) if style == Style.WHITE else Vector3(0.26, 0.15, 0.08))
 	skin_mat = mat
 	_skinned(mesh, mat)
@@ -1093,7 +1104,7 @@ func build_sleeve() -> void:
 	else:
 		mat.set_shader_parameter("base", Vector3(0.06, 0.055, 0.05))
 		mat.set_shader_parameter("dark", 1.0)
-		mat.set_shader_parameter("seed", 7.9)
+		mat.set_shader_parameter("seed", 4.6 if left else 7.9)
 	mat.set_shader_parameter("z0", z0)
 	mat.set_shader_parameter("elbow", FOREARM_CM)
 	sleeve_mat = mat
@@ -1343,6 +1354,9 @@ func _bezel(ba: BoneAttachment3D, at: Vector3, rad: float, h: float, mat: Materi
 
 
 func build_jewellery() -> void:
+	if left:
+		_left_jewellery()
+		return
 	if style == Style.WHITE:
 		# an old gold band with a lapis cabochon in a granulated bezel, on the ring finger
 		var gold := _jewel(0, Color(0.92, 0.7, 0.36), 0.38, {"tarnish": Vector3(0.12, 0.08, 0.04), "use_vc": 1.0, "band_r": 1.08, "seed": 2.0})
@@ -1464,6 +1478,35 @@ func build_jewellery() -> void:
 		cord.mesh = _tube_mesh(cord_path, 0.05, cord_crev, 6)
 		cord.material_override = _jewel(4, Color(0.09, 0.07, 0.05), 0.85, {"use_vc": 1.0, "seed": 19.0})
 		wrist.add_child(cord)
+
+
+## The other hand of the same man: a plain bronze band on the ring finger, worn thin and
+## brown with handling, and a bangle of two silver wires twisted together, gone dark.
+func _left_jewellery() -> void:
+	var bronze := _jewel(0, Color(0.7, 0.5, 0.3), 0.45, {"tarnish": Vector3(0.1, 0.065, 0.035), "verdigris": 0.35, "use_vc": 1.0, "band_r": 1.0, "seed": 23.0})
+	_ring("ring_0", 1.25, 0.95, 0.5, 0.17, bronze, 6.0)
+	var wrist := _attach("forearm")
+	var silver := _jewel(0, Color(0.66, 0.64, 0.6), 0.4, {"tarnish": Vector3(0.06, 0.055, 0.05), "use_vc": 1.0, "seed": 29.0})
+	var n := 420
+	var turns := 23.0
+	var rx := 3.3
+	var ry := 2.5
+	for s in 2:
+		var path := PackedVector3Array()
+		var crev := PackedVector3Array()
+		for i in n:
+			var t := TAU * i / n
+			# a bangle is a rigid ring: it hangs a little low on the wrist bone, off-centre
+			var c := _wrist_pt(t, rx, ry, -0.35, 2.0)
+			var out := Vector3(sin(t) / rx, cos(t) / ry, 0).normalized()
+			var ph := t * turns + PI * s
+			var off := out * cos(ph) * 0.07 + Vector3(0, 0, 1) * sin(ph) * 0.07
+			path.append(c + off)
+			crev.append(-off.normalized())
+		var wire := MeshInstance3D.new()
+		wire.mesh = _tube_mesh(path, 0.075, crev, 8)
+		wire.material_override = silver
+		wrist.add_child(wire)
 
 
 # ---------------------------------------------------------------- posing
@@ -1690,8 +1733,12 @@ func hand_basis(fwd: Vector3, pitch: float, roll: float) -> Basis:
 	var p := deg_to_rad(pitch)
 	var fz := f * cos(p) - Vector3.UP * sin(p)
 	var up := fz.cross(side).normalized()
-	var b := Basis(up.cross(fz).normalized(), up, fz)
-	return b.rotated(fz, deg_to_rad(roll))
+	var x := up.cross(fz).normalized()
+	if left:
+		# the left hand is the right one mirrored: its thumb is on the other side, and it
+		# rolls thumb-up the other way
+		return Basis(-x, up, fz).rotated(fz, deg_to_rad(-roll))
+	return Basis(x, up, fz).rotated(fz, deg_to_rad(roll))
 
 
 ## Put the hand so its grip point is at `grip` (world), fingers pointing along fwd.

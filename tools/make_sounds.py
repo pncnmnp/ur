@@ -241,7 +241,48 @@ def stone_slide(rng):
     return y
 
 
-SOUNDS = {"die_wall": die_wall, "die_floor": die_floor, "die_die": die_die, "dice_shake": dice_shake,
+# ------------------------------------------------------------------ dates
+def date_pick(rng):
+    """A date taken out of the earthen bowl: fingertips press into soft, sticky skin
+    (nothing to hear but a faint tacky "tk" as it lets go of the one beside it), the
+    dates under it shift a little against each other, a dull, soft knock, and the odd
+    one touches the clay: a tiny low "tok" of thick, porous earthenware, quickly dead."""
+    dur = 0.3
+    t = taxis(dur)
+    y = 0.35 * burst(rng, dur, 0.03, lo=250, hi=1800) * np.clip(t / 0.01, 0, 1)        # skins rubbing
+    at = int(rng.uniform(0.01, 0.03) * SR)
+    tack = burst(rng, dur, 0.0015, lo=900, hi=4000)
+    y[at:] += 0.45 * tack[: len(y) - at]                                              # sticky skin letting go
+    for k in range(rng.choice([1, 2])):                                               # soft fruit settling
+        at2 = int(rng.uniform(0.04, 0.16) * SR)
+        f = jit(rng, [180, 310, 520], 0.15)
+        knock = contact(modes(dur, f, [0.006, 0.004, 0.003], [1, 0.6, 0.3]), 0.003)
+        y[at2:] += rng.uniform(0.3, 0.6) * knock[: len(y) - at2]
+    if rng.random() < 0.5:                                                           # a date against the clay
+        at3 = int(rng.uniform(0.05, 0.15) * SR)
+        f = jit(rng, [620, 1150, 1900, 2700], 0.1)
+        clay = contact(modes(dur, f, [q_tau(x, rng.uniform(6, 10)) for x in f], [1, 0.7, 0.4, 0.2]), 0.0012)
+        y[at3:] += 0.35 * clay[: len(y) - at3]
+    return band(y, lo=120, hi=5000)
+
+
+def pit_drop(rng):
+    """A date stone dropped onto sand from a few centimetres: sand takes almost all of it,
+    a short, soft, dull thud and a whisper of grains, with the stone's own faint click."""
+    dur = 0.18
+    t = taxis(dur)
+    f = jit(rng, [140, 260, 420], 0.15)
+    y = contact(modes(dur, f, [0.01, 0.006, 0.004], [1, 0.6, 0.35]), 0.004)
+    y += 0.5 * burst(rng, dur, 0.012, lo=1500, hi=7000) * np.clip(t / 0.002, 0, 1)    # sand grains
+    f2 = jit(rng, [2600, 3900, 5200], 0.1)
+    y += 0.12 * contact(modes(dur, f2, [0.002, 0.0015, 0.001], [1, 0.6, 0.3]), 0.0003)
+    if rng.random() < 0.5:                                                           # it rolls over once
+        at = int(rng.uniform(0.03, 0.06) * SR)
+        y[at:] += 0.3 * contact(modes(dur, f, [0.006, 0.004, 0.003], [1, 0.6, 0.35]), 0.005)[: len(y) - at]
+    return band(y, lo=90, hi=8000)
+
+
+SOUNDS = {"date_pick": date_pick, "pit_drop": pit_drop, "die_wall": die_wall, "die_floor": die_floor, "die_die": die_die, "dice_shake": dice_shake,
           "stone_place": stone_place, "stone_stone": stone_stone, "stone_lift": stone_lift,
           "stone_slide": stone_slide}
 VARIANTS = 6
