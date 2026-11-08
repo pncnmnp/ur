@@ -47,7 +47,9 @@ var pose_cache := {}             # name -> {bone: Vector2}
 var sleeve_mat: ShaderMaterial
 var skin_mat: ShaderMaterial
 var tension := 0.0              # how hard the hand is gripping right now (0..1, follows the pose quickly)
-var pump := 0.0                 # blood built up in the veins by work (0..1, slow to fill and drain)
+var pump := 0.0                 # blood the hand's work has pumped into it (0..1, builds while gripping,
+                                 # ebbs over half a minute)
+var low := 0.5                  # how far the hand hangs down, so blood pools in it (0 lifted .. 1 low)
 var twist_rest := 0.3            # forearm twist (radians) in the arm's natural carriage
 var sway := Vector3.ZERO         # how far the loose cloth trails behind (world)
 var sway_v := Vector3.ZERO
@@ -119,7 +121,7 @@ uniform int tattoo = 0;          // 0: ankh on the back of the hand; 1: dotted l
 uniform float seed = 0.0;
 uniform int debug_view = 0;      // 1: show the vertex masks, 2: show the region, 3: joint flex, 4: veins/tendons
 uniform float flex[18];          // each bone's current flex (degrees), by skeleton index
-uniform float pump = 0.0;        // 0 slack .. 1 clenched hard: how full the veins are
+uniform float pump = 0.0;        // 0 drained (hand lifted) .. 1 full (hand low after hard work)
 uniform vec4 extend = vec4(0.0); // index, middle, ring, pinky: how straight (tendons taut)
 varying vec4 rest;
 varying vec4 masks;
@@ -242,7 +244,7 @@ float pl4(vec2 q, vec2 a, vec2 b, vec2 c, vec2 d) {
 // little-finger side (basilic), plus a few smaller ones. Returns the bulge (0..1 scale).
 float vein_net(vec2 q, float fill, float wide) {
 	float b = 0.0;
-	float r = 0.15 * (0.75 + 0.6 * fill) * wide;
+	float r = 0.15 * (0.7 + 0.9 * fill) * wide;
 	float taper = mix(1.0, 0.75, smoothstep(6.0, 9.2, q.y));
 	b = max(b, gauss(pl4(q, vec2(1.95, 9.1), vec2(1.8, 7.7), vec2(1.55, 6.4), vec2(1.5, 5.5)), r * taper));
 	b = max(b, gauss(pl4(q, vec2(-0.05, 9.2), vec2(-0.15, 7.9), vec2(-0.4, 6.6), vec2(-0.6, 5.6)), r * taper));
@@ -291,7 +293,7 @@ void vertex() {
 		// in the sun's shadow pass (orthographic) keep only a little of the swelling: the shadow
 		// map is far coarser than a vein and would smear it into dark blotches
 		float in_shadow = PROJECTION_MATRIX[3][3] > 0.5 ? 0.2 : 1.0;
-		VERTEX += NORMAL * vb * (0.015 + 0.2 * f * f + 0.05 * f) * in_shadow;
+		VERTEX += NORMAL * vb * (0.004 + 0.16 * f + 0.24 * f * f) * in_shadow;
 	}
 }
 
@@ -336,7 +338,7 @@ void fragment() {
 	vec2 vq = rest.xz + (vec2(vnoise(p * 0.8), vnoise(p * 0.8 + 17.0)) - 0.5) * 0.55;
 	float fill = clamp(pump, 0.0, 1.0);
 	float vb = vein_net(vq, fill, 1.0) * back * smoothstep(-1.5, 0.5, rest.z) * smoothstep(9.8, 8.6, rest.z);
-	float vh = vb * (0.02 + 0.16 * fill * fill + 0.04 * fill);
+	float vh = vb * (0.006 + 0.12 * fill + 0.19 * fill * fill);
 	vec4 tens = clamp(extend * 0.85 + 0.15 + 0.25 * fill, 0.0, 1.2);
 	float td = tens.x * tendon(rest.xz, vec2(0.9, 0.8), vec2(2.75, 9.5)) + tens.y * tendon(rest.xz, vec2(0.35, 0.8), vec2(0.9, 9.8))
 		+ tens.z * tendon(rest.xz, vec2(-0.25, 0.8), vec2(-1.05, 9.4)) + tens.w * tendon(rest.xz, vec2(-0.8, 1.0), vec2(-2.9, 8.5));
@@ -369,7 +371,7 @@ void fragment() {
 	col = mix(col, col * 1.25 + vec3(0.05, 0.045, 0.04), ash * 0.3);
 	col = mix(col, col * vec3(1.2, 1.12, 1.04) + vec3(0.02, 0.015, 0.01), blanch * 0.35);
 	// blue-green blood under thin skin, a touch darker where the vein lies deep
-	col = mix(col, col * vec3(0.84, 0.9, 0.97), vb * (0.1 + 0.14 * fill));
+	col = mix(col, col * vec3(0.8, 0.88, 0.98), vb * (0.03 + 0.12 * fill + 0.18 * fill * fill));
 	col = mix(col, vec3(0.55, 0.24, 0.17), scr * 0.35);
 	col = mix(col, col * vec3(1.18, 1.08, 1.0), scar * 0.4);
 	col = mix(col, col * vec3(0.62, 0.55, 0.48), (grime * 0.25 + wr * 0.35 + furrow * 0.04 + fold * 0.3) * 0.6);
@@ -1596,9 +1598,11 @@ func _apply_pose() -> void:
 
 
 ## Hand the skin shader the pose: every joint's bend (knuckle wrinkles), how straight each
-## finger is (extensor tendons) and how full the veins are. The veins rise within a fraction
-## of a second of the hand clenching and sink when it lets go; on top of that, repeated work
-## pumps them up for a while, so they stay a little proud after a hard grip. delta < 0 snaps.
+## finger is (extensor tendons) and how full the veins on the back of the hand are.
+## The veins behave like real ones: blood pools in a hand held low, so they show even at
+## rest, and drains out of a lifted one within a second or two; gripping squeezes more blood
+## into them at once, and work pumps them up so they stay swollen well after the hand lets
+## go, ebbing over half a minute. delta < 0 snaps the quick parts.
 func _update_skin(delta := -1.0) -> void:
 	if skin_mat == null:
 		return
@@ -1618,18 +1622,25 @@ func _update_skin(delta := -1.0) -> void:
 		grip += clampf((a + b) / 170.0, 0.0, 1.0) * weight[k]
 		ext[k] = 0.7 * smoothstep(18.0, -6.0, a) + 0.3 * smoothstep(14.0, -4.0, b)
 		k += 1
-	# a firm grip, or every finger stretched hard, makes the veins stand up
+	# a firm grip, or every finger stretched hard, is effort
 	var spread := (ext.x + ext.y + ext.z + ext.w) / 4.0 * smoothstep(0.4, 0.9, (ext.x + ext.w) / 2.0)
 	var want := clampf(smoothstep(0.18, 0.7, grip) + 0.4 * spread, 0.0, 1.0)
+	# how low the wrist is against the shoulder: down at the board the veins fill, lifted
+	# (rattling and throwing the dice) they empty
+	var drop_cm := (global_position.y - shoulder.y) / CM
+	var want_low := smoothstep(4.0, -10.0, drop_cm)
 	if delta < 0.0:
 		tension = want
-		pump = want * 0.5
+		low = want_low
 	else:
 		tension = lerpf(tension, want, 1.0 - exp(-(9.0 if want > tension else 5.0) * delta))
-		pump = move_toward(pump, tension, delta * (0.6 if tension > pump else 0.15))
+		low = lerpf(low, want_low, 1.0 - exp(-1.6 * delta))
+		pump = clampf(pump + delta * (0.15 * tension - 0.025), 0.0, 1.0)
+	# a raised hand drains even after hard work; a low one shows all of it
+	var fill := 0.4 * low + 0.3 * tension + 0.5 * pump * (0.3 + 0.7 * low)
 	skin_mat.set_shader_parameter("flex", fl)
 	skin_mat.set_shader_parameter("extend", ext)
-	skin_mat.set_shader_parameter("pump", clampf(0.08 + 0.85 * tension + 0.3 * pump, 0.0, 1.0))
+	skin_mat.set_shader_parameter("pump", clampf(fill, 0.0, 1.0))
 
 
 ## Grip point in hand-local cm: an explicit one while holding something, otherwise
@@ -1795,6 +1806,7 @@ func _aim_basis(z: Vector3, up := Vector3.UP) -> Basis:
 func _process(delta: float) -> void:
 	if not visible:
 		swing_live = false
+		pump = maxf(pump - 0.025 * delta, 0.0)
 		return
 	var k := 1.0 - exp(-pose_rate * delta)
 	for i in pose_tgt:
