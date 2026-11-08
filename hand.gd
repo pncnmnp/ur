@@ -55,6 +55,10 @@ var tension := 0.0              # how hard the hand is gripping right now (0..1,
 var pump := 0.0                 # blood the hand's work has pumped into it (0..1, builds while gripping,
                                  # ebbs over ~15 s)
 const PUMP_EBB := 0.065          # how fast the pump ebbs (per second)
+var sweat := 0.0                 # sheen on the back of the hand (0 dry .. 1 glistening): builds slowly
+                                 # in the heat as the game goes on, faster while the hand works
+const SWEAT_HEAT := 1.0 / 1400.0  # per second from the sun alone (most of the way there in ~25 min)
+const SWEAT_WORK := 1.0 / 260.0   # extra per second at full effort
 var low := 0.5                  # how far the hand hangs down, so blood pools in it (0 lifted .. 1 low)
 var twist_rest := 0.3            # forearm twist (radians) in the arm's natural carriage
 var sway := Vector3.ZERO         # how far the loose cloth trails behind (world)
@@ -128,10 +132,11 @@ uniform vec3 skin_tone = vec3(0.4, 0.25, 0.15);
 uniform int tattoo = 0;          // 0: ankh on the back of the hand; 1: dotted lozenge + wrist band;
                                  // 2: only three dots in the web of the thumb
 uniform float seed = 0.0;
-uniform int debug_view = 0;      // 1: show the vertex masks, 2: show the region, 3: joint flex, 4: veins/tendons
+uniform int debug_view = 0;      // 1: show the vertex masks, 2: show the region, 3: joint flex, 4: veins/tendons, 5: sweat film/beads
 uniform float flex[18];          // each bone's current flex (degrees), by skeleton index
 uniform float pump = 0.0;        // 0 drained (hand lifted) .. 1 full (hand low after hard work)
 uniform vec4 extend = vec4(0.0); // index, middle, ring, pinky: how straight (tendons taut)
+uniform float sweat = 0.0;       // 0 dry .. 1 a long hot game: a thin wet film on the back and knuckles
 varying vec4 rest;
 varying vec4 masks;
 varying vec2 fuv;
@@ -280,6 +285,28 @@ float tendon(vec2 q, vec2 a, vec2 b) {
 	float t = clamp(dot(q - a, ba) / dot(ba, ba), 0.0, 1.0);
 	return gauss(length(q - a - ba * t), 0.2) * smoothstep(0.2, 0.55, t) * smoothstep(1.0, 0.88, t);
 }
+// Tiny sweat beads in a jittered grid over the chart q (cm): returns (dome height 0..1,
+// coverage). amt 0..1 is how many cells hold one; they stay small, under a millimetre.
+vec2 beads(vec2 q, float amt, float sd) {
+	const float cs = 0.32;
+	vec2 id = floor(q / cs);
+	float hgt = 0.0, cov = 0.0;
+	for (int j = -1; j <= 1; j++) {
+		for (int i = -1; i <= 1; i++) {
+			vec2 c = id + vec2(float(i), float(j));
+			vec4 h = hash4(c + sd);
+			if (h.x > amt) continue;
+			vec2 ctr = (c + 0.2 + 0.6 * h.yz) * cs;
+			float r = 0.025 + 0.035 * h.w;
+			float d = length((q - ctr) * vec2(1.0, 0.85)) / r;
+			if (d < 1.0) {
+				hgt = max(hgt, sqrt(1.0 - d * d));
+				cov = max(cov, smoothstep(1.0, 0.8, d));
+			}
+		}
+	}
+	return vec2(hgt, cov);
+}
 
 void vertex() {
 	rest = CUSTOM0;
@@ -380,10 +407,26 @@ void fragment() {
 	float grime = smoothstep(0.45, 0.9, vnoise(p * 1.9 + 7.0));
 	float dust = smoothstep(0.72, 0.9, vnoise(p * 9.0 + 4.0)) * smoothstep(0.4, 0.8, vnoise(p * 1.2 + 11.0));
 
+	// sweat: a thin film that starts on the knuckles and the tight skin over the bones and
+	// spreads in patches over the back of the hand as the game goes on; at the top end a
+	// few tiny beads gather on and between the knuckles
+	float sw = clamp(sweat, 0.0, 1.0);
+	float nmask = smoothstep(0.35, 0.75, nail);
+	float site = smoothstep(0.45, 0.85, dorsal) * (1.0 - nmask);
+	float patch = 0.6 * vnoise(p * 0.75 + 50.0) + 0.4 * vnoise(p * 2.4 + 61.0) + 0.3 * jnt + 0.15 * td + 0.1 * vb;
+	float spread = 1.0 - 0.85 * sw;
+	float wet = site * smoothstep(spread - 0.12, spread + 0.12, patch) * smoothstep(0.0, 0.35, sw);
+	wet *= 0.75 + 0.25 * (1.0 - smoothstep(0.0, 0.25, furrow));   // the film sits in the furrows too, but thinner on the ridges
+	vec2 bd = vec2(0.0);
+	if (wet > 0.02 && sw > 0.7 && jnt > 0.05) {
+		float amt = smoothstep(0.7, 1.0, sw) * smoothstep(0.05, 0.6, jnt) * 0.35;
+		bd = beads(rest.xz + rest.yy * 0.31, amt, 7.0 + seed) * (1.0 - smoothstep(0.012, 0.03, px)) * wet * (1.0 - hr.x);
+	}
+
 	vec3 col = skin;
 	col *= 1.0 - 0.08 * pore;
 	col *= 1.0 - 0.3 * wr - 0.012 * furrow - 0.35 * fold;
-	col = mix(col, col * 1.25 + vec3(0.05, 0.045, 0.04), ash * 0.3);
+	col = mix(col, col * 1.25 + vec3(0.05, 0.045, 0.04), ash * 0.3 * (1.0 - 0.7 * wet));   // damp skin is not ashy
 	col = mix(col, col * vec3(1.2, 1.12, 1.04) + vec3(0.02, 0.015, 0.01), blanch * 0.35);
 	// blue-green blood under thin skin, a touch darker where the vein lies deep
 	col = mix(col, col * vec3(0.8, 0.88, 0.98), vb * (0.03 + 0.12 * fill + 0.18 * fill * fill));
@@ -391,6 +434,7 @@ void fragment() {
 	col = mix(col, col * vec3(1.18, 1.08, 1.0), scar * 0.4);
 	col = mix(col, col * vec3(0.62, 0.55, 0.48), (grime * 0.25 + wr * 0.35 + furrow * 0.04 + fold * 0.3) * 0.6);
 	col = mix(col, vec3(0.66, 0.55, 0.4), dust * 0.25);
+	col *= (1.0 - 0.07 * wet) * (1.0 - 0.12 * bd.y);              // wet skin reads a shade deeper
 
 	// tattoo: soot ink under the skin, blurred and faded blue-green with age
 	float ink = tattoo_ink(rest.xz) * smoothstep(0.55, 0.85, dorsal) * (region < 1.5 ? 1.0 : 0.0);
@@ -416,15 +460,18 @@ void fragment() {
 	if (debug_view == 2) col = vec3(rest.w / 3.0, fract(rest.z * 0.2), 0.0);
 	if (debug_view == 3) col = vec3(clamp(jf, 0.0, 1.0), clamp(-jf * 3.0, 0.0, 1.0), prox * 0.5);
 	if (debug_view == 4) col = vec3(vb, td, hr.x);
+	if (debug_view == 5) col = vec3(wet, bd.y, 0.0);
 	ALBEDO = col;
 	float nm = smoothstep(0.35, 0.75, nail);
-	float rough = 0.58 - 0.08 * jnt + 0.15 * ash + 0.1 * dust + 0.06 * furrow - 0.1 * blanch - 0.06 * vb;
-	ROUGHNESS = clamp(mix(mix(rough, 0.42, hr.x), 0.45 + 0.3 * under, nm), 0.2, 1.0);
+	float rough = 0.58 - 0.08 * jnt + 0.15 * ash * (1.0 - wet) + 0.1 * dust + 0.06 * furrow - 0.1 * blanch - 0.06 * vb;
+	rough = mix(rough, 0.3 - 0.04 * jnt, wet * (0.45 + 0.55 * sw));   // the film: from a soft sheen to a glisten
+	rough = mix(rough, 0.1, bd.y);
+	ROUGHNESS = clamp(mix(mix(rough, 0.42, hr.x), 0.45 + 0.3 * under, nm), 0.08, 1.0);
 	SPECULAR = 0.35;
 	SSS_STRENGTH = 0.3 * (1.0 - nm);
 	BACKLIGHT = vec3(0.35, 0.12, 0.06) * 0.6;
 
-	float h = -wr * 0.03 - furrow * 0.00035 + pore * 0.003 - scr * 0.008 - fold * 0.012
+	float h = -wr * 0.03 - furrow * 0.00035 * (1.0 - 0.6 * wet) + pore * 0.003 * (1.0 - 0.5 * wet) + bd.x * 0.006 - scr * 0.008 - fold * 0.012
 		+ hr.x * 0.003 + ash * 0.006 + (ridges - 0.5) * 0.01 * nail - under * 0.01
 		+ (vh + td * (0.03 + 0.07 * dot(extend, vec4(0.25)) + 0.03 * fill)) * CMW;
 	vec3 dpdx = dFdx(VERTEX);
@@ -1715,6 +1762,13 @@ func _update_skin(delta := -1.0) -> void:
 	skin_mat.set_shader_parameter("flex", fl)
 	skin_mat.set_shader_parameter("extend", ext)
 	skin_mat.set_shader_parameter("pump", clampf(fill, 0.0, 1.0))
+	skin_mat.set_shader_parameter("sweat", sweat)
+
+
+## He sits in the sun the whole game, so the hand keeps getting a little wetter whether it is
+## on the table or not; work (gripping, shaking dice) speeds it. It eases toward 1, never past.
+func _sweat(delta: float) -> void:
+	sweat = minf(sweat + delta * (SWEAT_HEAT + SWEAT_WORK * tension) * (1.0 - 0.6 * sweat), 1.0)
 
 
 ## Grip point in hand-local cm: an explicit one while holding something, otherwise
@@ -1891,11 +1945,13 @@ func _process(delta: float) -> void:
 	if not visible:
 		swing_live = false
 		pump = maxf(pump - PUMP_EBB * delta, 0.0)
+		_sweat(delta)
 		return
 	var k := 1.0 - exp(-pose_rate * delta)
 	for i in pose_tgt:
 		pose_cur[i] = (pose_cur[i] as Vector2).lerp(pose_tgt[i], k)
 	_apply_pose()
+	_sweat(delta)
 	_update_skin(delta)
 	_place_now()
 	_swing_cloth(delta)

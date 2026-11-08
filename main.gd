@@ -1581,6 +1581,15 @@ func set_up(g: UrGame) -> void:
 	if grip and grip.active():
 		grip.end()
 	dice_hand = null
+	# a fresh game starts with dry hands; a loaded one as damp as that far into a game
+	var lead := 0
+	for p in 2:
+		var sum := 0
+		for w in game.pos[p]:
+			sum += w
+		lead = maxi(lead, sum)
+	for h in hands + [lhand]:
+		h.sweat = 0.75 * lead / float(UrGame.PIECES * UrGame.FINISH)
 	for h in hands:
 		h.aim_yaw = 0.0
 		h.aim_roll = 0.0
