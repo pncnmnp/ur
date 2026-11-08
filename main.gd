@@ -75,6 +75,10 @@ var ui_font: SystemFont
 var tex_cache := {}
 var title_label: Label
 var new_button: Button
+var save_button: Button
+var load_button: Button
+var turn_state: UrGame              # the position as the current turn began (or the next one will): what a save keeps
+const SAVE_PATH := "user://ur_save.json"
 # the clay tablet the game's messages are scratched into
 var tablet_mat: ShaderMaterial
 var tablet_label: Label
@@ -1460,24 +1464,35 @@ func build_ui() -> void:
 	tw.tween_interval(3.0)
 	tw.tween_property(title_label, "modulate:a", 0.0, 2.0)
 
-	# a faint "new game" link in the corner, brighter on hover
-	new_button = Button.new()
-	new_button.text = "new game"
-	new_button.flat = true
-	new_button.focus_mode = Control.FOCUS_NONE
-	new_button.add_theme_font_override("font", ui_font)
-	new_button.add_theme_font_size_override("font_size", 24)
-	for st in ["normal", "hover", "pressed", "focus"]:
-		new_button.add_theme_stylebox_override(st, StyleBoxEmpty.new())
-	new_button.add_theme_color_override("font_color", Color(cream, 0.5))
-	new_button.add_theme_color_override("font_hover_color", Color(cream, 0.95))
-	new_button.add_theme_color_override("font_pressed_color", Color(cream, 0.7))
-	new_button.add_theme_color_override("font_shadow_color", Color(0.1, 0.05, 0.02, 0.6))
-	new_button.add_theme_constant_override("shadow_offset_y", 2)
-	new_button.size = Vector2(170, 44)
-	new_button.position = Vector2(1600 - 190, 18)
-	new_button.pressed.connect(new_game)
-	root.add_child(new_button)
+	# faint links down the corner, brighter on hover: new game, save, load
+	new_button = corner_link(root, "new game", 0, new_game)
+	save_button = corner_link(root, "save game", 1, save_game)
+	load_button = corner_link(root, "load game", 2, load_game)
+	load_button.disabled = not FileAccess.file_exists(SAVE_PATH)
+
+
+func corner_link(root: Control, text: String, row: int, on_press: Callable) -> Button:
+	var cream := Color(0.98, 0.9, 0.72)
+	var b := Button.new()
+	b.text = text
+	b.flat = true
+	b.focus_mode = Control.FOCUS_NONE
+	b.alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	b.add_theme_font_override("font", ui_font)
+	b.add_theme_font_size_override("font_size", 24)
+	for st in ["normal", "hover", "pressed", "focus", "disabled"]:
+		b.add_theme_stylebox_override(st, StyleBoxEmpty.new())
+	b.add_theme_color_override("font_color", Color(cream, 0.5))
+	b.add_theme_color_override("font_hover_color", Color(cream, 0.95))
+	b.add_theme_color_override("font_pressed_color", Color(cream, 0.7))
+	b.add_theme_color_override("font_disabled_color", Color(cream, 0.18))
+	b.add_theme_color_override("font_shadow_color", Color(0.1, 0.05, 0.02, 0.6))
+	b.add_theme_constant_override("shadow_offset_y", 2)
+	b.size = Vector2(190, 40)
+	b.position = Vector2(1600 - 210, 18 + row * 38)
+	b.pressed.connect(on_press)
+	root.add_child(b)
+	return b
 
 
 # ======================================================================
@@ -1485,12 +1500,71 @@ func build_ui() -> void:
 # ======================================================================
 
 func new_game() -> void:
+	set_up(UrGame.new())
+
+
+## Write the position at the start of this turn to the single save slot.
+func save_game() -> void:
+	if phase == Phase.OVER or turn_state == null:
+		flash(save_button, "game over")
+		return
+	var data := {"pos": turn_state.pos, "current": turn_state.current}
+	var f := FileAccess.open(SAVE_PATH, FileAccess.WRITE)
+	if f == null:
+		push_warning("could not save: %s" % error_string(FileAccess.get_open_error()))
+		return
+	f.store_string(JSON.stringify(data))
+	f.close()
+	load_button.disabled = false
+	flash(save_button, "saved")
+
+
+## Lay the table out as the save slot has it, and play on from the start of that turn.
+func load_game() -> void:
+	var g := read_save()
+	if g == null:
+		flash(load_button, "no save")
+		return
+	set_up(g)
+
+
+func read_save() -> UrGame:
+	if not FileAccess.file_exists(SAVE_PATH):
+		return null
+	var data: Variant = JSON.parse_string(FileAccess.get_file_as_string(SAVE_PATH))
+	if not data is Dictionary or not data.has("pos") or not data.has("current"):
+		return null
+	var g := UrGame.new()
+	for p in 2:
+		var row: Variant = data.pos[p] if data.pos is Array and data.pos.size() == 2 else null
+		if not row is Array or row.size() != UrGame.PIECES:
+			return null
+		for i in UrGame.PIECES:
+			var w := int(row[i])
+			if w < 0 or w > UrGame.FINISH:
+				return null
+			g.pos[p][i] = w
+	g.current = clampi(int(data.current), 0, 1)
+	return g
+
+
+## Briefly show a word in place of a corner link's label.
+func flash(b: Button, word: String) -> void:
+	var text: String = b.get_meta("label", b.text)
+	b.set_meta("label", text)
+	b.text = word
+	var tw := create_tween()
+	tw.tween_interval(1.2)
+	tw.tween_callback(func() -> void: b.text = text)
+
+
+func set_up(g: UrGame) -> void:
 	epoch += 1
 	for t in tweens:
 		if t.is_valid():
 			t.kill()
 	tweens.clear()
-	game = UrGame.new()
+	game = g
 	roll = -1
 	legal = []
 	sel_idx = -1
@@ -1514,10 +1588,16 @@ func new_game() -> void:
 		b.visible = true
 		b.freeze = false
 	for p in 2:
+		var done_k := 0
 		for i in UrGame.PIECES:
-			pnodes[p][i].position = rest(slot_pos(p, 0, i, 0))
-			pnodes[p][i].rotation.x = 0.0
-			pnodes[p][i].rotation.z = 0.0
+			var node: Node3D = pnodes[p][i]
+			var w: int = game.pos[p][i]
+			node.position = rest(slot_pos(p, w, i, done_k))
+			node.rotation.x = 0.0
+			node.rotation.z = 0.0
+			if w >= UrGame.FINISH:
+				node.rotation.y = home_yaw(node.rotation.y, done_k, p)
+				done_k += 1
 	start_turn()
 
 
@@ -1540,6 +1620,7 @@ func start_turn() -> void:
 	var e := epoch
 	legal = []
 	sel_idx = -1
+	turn_state = game.clone()
 	if game.current == HUMAN:
 		phase = Phase.ROLL
 		set_status("Your turn\ncast the dice in the tray")
@@ -1690,6 +1771,10 @@ func perform_move(idx: int) -> void:
 	hand_leave(h)
 
 	var r := game.apply_move(p, src, roll, idx)
+	# a save from here on keeps this move, and whose turn comes of it
+	turn_state = game.clone()
+	if not r.extra_turn:
+		turn_state.current = 1 - p
 	var msg := "%s moved %d" % [who, roll]
 	if r.captured:
 		msg = "%s captured a stone" % who
