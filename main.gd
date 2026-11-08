@@ -1395,7 +1395,7 @@ func start_turn() -> void:
 		set_status("Your turn\ncast the dice in the tray")
 	else:
 		phase = Phase.BUSY
-		set_status("The AI's turn")
+		set_status("Al-Khasm's turn")
 		await get_tree().create_timer(0.7).timeout
 		if e != epoch:
 			return
@@ -1421,7 +1421,7 @@ func do_roll() -> void:
 	roll = 0
 	for r in dice_result:
 		roll += r
-	var who := "You" if game.current == HUMAN else "The AI"
+	var who := "You" if game.current == HUMAN else "Al-Khasm"
 	legal = game.legal_moves(game.current, roll)
 	if legal.is_empty():
 		set_status("%s threw %d\nno move" % [who, roll])
@@ -1435,7 +1435,7 @@ func do_roll() -> void:
 		phase = Phase.MOVE
 		set_status("You threw %d\nmove a stone %d" % [roll, roll])
 	else:
-		set_status("The AI threw %d" % roll)
+		set_status("Al-Khasm threw %d" % roll)
 		await get_tree().create_timer(0.8).timeout
 		if e != epoch:
 			return
@@ -1447,7 +1447,7 @@ func perform_move(idx: int) -> void:
 	var e := epoch
 	var p := game.current
 	var h: UrHand = hands[p]
-	var who := "You" if p == HUMAN else "The AI"
+	var who := "You" if p == HUMAN else "Al-Khasm"
 	var src: int = game.pos[p][idx]
 	var dst := src + roll
 	var node: Node3D = pnodes[p][idx]
@@ -1529,10 +1529,10 @@ func perform_move(idx: int) -> void:
 		msg = "%s captured a stone" % who
 	if game.has_won(p):
 		phase = Phase.OVER
-		set_status("You win!" if p == HUMAN else "The AI wins")
+		set_status("You win!" if p == HUMAN else "Al-Khasm wins")
 		return
 	if r.extra_turn:
-		msg = "Rosette\n%s again" % ("you throw" if p == HUMAN else "the AI throws")
+		msg = "Rosette\n%s again" % ("you throw" if p == HUMAN else "Al-Khasm throws")
 	set_status(msg)
 	await get_tree().create_timer(0.8).timeout
 	if e != epoch:

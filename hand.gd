@@ -45,6 +45,9 @@ var move_id := 0                 # bumped by every new hand movement; older ones
 var grip_override: Variant = null  # hand-local cm point to place at the target (e.g. the held stone)
 var pose_cache := {}             # name -> {bone: Vector2}
 var sleeve_mat: ShaderMaterial
+var skin_mat: ShaderMaterial
+var tension := 0.0              # how hard the hand is gripping right now (0..1, follows the pose quickly)
+var pump := 0.0                 # blood built up in the veins by work (0..1, slow to fill and drain)
 var twist_rest := 0.3            # forearm twist (radians) in the arm's natural carriage
 var sway := Vector3.ZERO         # how far the loose cloth trails behind (world)
 var sway_v := Vector3.ZERO
@@ -108,18 +111,33 @@ render_mode cull_back;
 // Weathered, sun-browned skin of a man who works outdoors. Patterns are placed with
 // the rest-pose position (CUSTOM0, in cm) and per-vertex masks from make_hand.py:
 // COLOR = nail, joint, dorsal (back of hand), nail tip; UV = (along finger, around).
+// The pose feeds in too: knuckle skin bunches when a finger is straight and pulls tight
+// and pale when it bends, the veins fill and stand out as the hand works, and the
+// extensor tendons show on the back of the hand as the fingers straighten.
 uniform vec3 skin_tone = vec3(0.4, 0.25, 0.15);
 uniform int tattoo = 0;          // 0: ankh on the back of the hand; 1: dotted lozenge + wrist band
 uniform float seed = 0.0;
-uniform int debug_view = 0;      // 1: show the vertex masks, 2: show the region
+uniform int debug_view = 0;      // 1: show the vertex masks, 2: show the region, 3: joint flex, 4: veins/tendons
+uniform float flex[18];          // each bone's current flex (degrees), by skeleton index
+uniform float pump = 0.0;        // 0 slack .. 1 clenched hard: how full the veins are
+uniform vec4 extend = vec4(0.0); // index, middle, ring, pinky: how straight (tendons taut)
 varying vec4 rest;
 varying vec4 masks;
 varying vec2 fuv;
+varying float jflex;             // flex of the joint nearest this point (degrees)
+varying float prox;              // how much this point rides on a proximal finger bone
+
+const float CMW = 0.21;          // world units per cm (heights below are in cm)
 
 float hash(vec3 p) {
 	p = fract(p * 0.3183099 + 0.1);
 	p *= 17.0;
 	return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+}
+vec4 hash4(vec2 p) {
+	vec4 p4 = fract(vec4(p.xyx, p.y) * vec4(0.1031, 0.1030, 0.0973, 0.1099));
+	p4 += dot(p4, p4.wzxy + 33.33);
+	return fract((p4.xxyz + p4.yzzw) * p4.zywx);
 }
 float vnoise(vec3 x) {
 	vec3 i = floor(x);
@@ -127,6 +145,21 @@ float vnoise(vec3 x) {
 	f = f * f * (3.0 - 2.0 * f);
 	return mix(mix(mix(hash(i), hash(i + vec3(1, 0, 0)), f.x), mix(hash(i + vec3(0, 1, 0)), hash(i + vec3(1, 1, 0)), f.x), f.y),
 		mix(mix(hash(i + vec3(0, 0, 1)), hash(i + vec3(1, 0, 1)), f.x), mix(hash(i + vec3(0, 1, 1)), hash(i + vec3(1, 1, 1)), f.x), f.y), f.z);
+}
+// Distance to the nearest cell edge of a 3D Voronoi pattern: the fine criss-cross of
+// furrows on the back of the hand.
+float cell_edge(vec3 x) {
+	vec3 i = floor(x);
+	vec3 f = fract(x);
+	float f1 = 8.0, f2 = 8.0;
+	for (int k = 0; k < 27; k++) {
+		vec3 o = vec3(float(k % 3), float((k / 3) % 3), float(k / 9)) - 1.0;
+		vec3 c = i + o;
+		vec3 r = o + vec3(hash(c), hash(c + 17.31), hash(c + 41.7)) - f;
+		float d = dot(r, r);
+		if (d < f1) { f2 = f1; f1 = d; } else if (d < f2) { f2 = d; }
+	}
+	return sqrt(f2) - sqrt(f1);
 }
 float seg(vec2 p, vec2 a, vec2 b) {
 	vec2 pa = p - a, ba = b - a;
@@ -164,10 +197,102 @@ float tattoo_ink(vec2 q) {
 	return ink;
 }
 
+
+// Single hairs lying along +y of the chart q (cm), rooted in a jittered grid. Returns
+// (coverage, how far along the hair, soft shadow beneath). Hairs thinner than a pixel
+// fade out by the part of the pixel they cover, so at a distance they read as a haze.
+vec3 hairs(vec2 q, float dens, float len, float wid, float cell, float sd) {
+	vec2 cs = vec2(cell, cell * 1.9);
+	vec2 id = floor(q / cs);
+	float aa = max(length(fwidth(q)) * 0.7, 1e-4);
+	float cov = 0.0, along = 0.0, sh = 0.0;
+	for (int j = -2; j <= 0; j++) {
+		for (int i = -1; i <= 1; i++) {
+			vec2 c = id + vec2(float(i), float(j));
+			vec4 h = hash4(c + sd);
+			if (h.x > dens) continue;
+			vec2 root = (c + vec2(h.y, fract(h.y * 7.13 + h.w * 3.1))) * cs;
+			float a = (h.z - 0.5) * 0.75;
+			vec2 dir = vec2(sin(a), cos(a));
+			vec2 side = vec2(dir.y, -dir.x);
+			float L = len * (0.5 + 0.5 * h.w);
+			float bend = (fract(h.w * 13.7) - 0.5) * 0.35 * L;
+			vec2 r = q - root;
+			float t = clamp(dot(r, dir) / L, 0.0, 1.0);
+			vec2 pt = root + dir * L * t + side * bend * t * t;
+			float d = length(q - pt);
+			float w = wid * (1.0 - 0.7 * t) * (0.7 + 0.6 * fract(h.y * 31.0));
+			float c1 = clamp(1.0 - (d - w) / aa, 0.0, 1.0) * min(1.0, 2.0 * w / aa);
+			if (c1 > cov) { cov = c1; along = t; }
+			sh = max(sh, (1.0 - smoothstep(0.0, w * 6.0 + aa, d)) * (1.0 - t));
+		}
+	}
+	return vec3(cov, along, sh);
+}
+
+float gauss(float d, float r) {
+	return exp(-d * d / (r * r));
+}
+// Distance to a polyline of four points
+float pl4(vec2 q, vec2 a, vec2 b, vec2 c, vec2 d) {
+	return min(min(seg(q, a, b), seg(q, b, c)), seg(q, c, d));
+}
+// The veins on the back of the hand (rest x, z in cm): three metacarpal veins from the
+// finger webs into the dorsal arch, which drains up the thumb side (cephalic) and the
+// little-finger side (basilic), plus a few smaller ones. Returns the bulge (0..1 scale).
+float vein_net(vec2 q, float fill, float wide) {
+	float b = 0.0;
+	float r = 0.15 * (0.75 + 0.6 * fill) * wide;
+	float taper = mix(1.0, 0.75, smoothstep(6.0, 9.2, q.y));
+	b = max(b, gauss(pl4(q, vec2(1.95, 9.1), vec2(1.8, 7.7), vec2(1.55, 6.4), vec2(1.5, 5.5)), r * taper));
+	b = max(b, gauss(pl4(q, vec2(-0.05, 9.2), vec2(-0.15, 7.9), vec2(-0.4, 6.6), vec2(-0.6, 5.6)), r * taper));
+	b = max(b, gauss(pl4(q, vec2(-2.05, 8.8), vec2(-2.25, 7.6), vec2(-2.4, 6.3), vec2(-2.5, 5.1)), r * 0.9 * taper));
+	float rm = r * 1.25;
+	b = max(b, gauss(pl4(q, vec2(2.4, 4.6), vec2(1.5, 5.5), vec2(0.4, 5.9), vec2(-0.6, 5.6)), rm));
+	b = max(b, gauss(pl4(q, vec2(-0.6, 5.6), vec2(-1.6, 5.4), vec2(-2.5, 5.1), vec2(-3.3, 4.4)), rm));
+	b = max(b, gauss(pl4(q, vec2(2.4, 4.6), vec2(2.6, 3.0), vec2(2.3, 1.3), vec2(2.0, -0.8)), rm * 1.1));
+	b = max(b, gauss(pl4(q, vec2(-3.3, 4.4), vec2(-3.4, 2.8), vec2(-3.1, 0.8), vec2(-2.7, -1.5)), rm * 1.05));
+	b = max(b, 0.7 * gauss(pl4(q, vec2(0.4, 5.9), vec2(0.3, 4.2), vec2(-0.4, 2.6), vec2(-0.6, 0.5)), r * 0.75));
+	b = max(b, 0.6 * gauss(pl4(q, vec2(1.8, 7.7), vec2(2.3, 7.8), vec2(2.7, 7.6), vec2(3.0, 7.2)), r * 0.6));
+	b = max(b, 0.6 * gauss(pl4(q, vec2(-2.25, 7.6), vec2(-2.7, 7.4), vec2(-3.1, 7.1), vec2(-3.5, 6.6)), r * 0.6));
+	return b;
+}
+// One extensor tendon from the wrist to a knuckle: a broad ridge on its distal two thirds.
+float tendon(vec2 q, vec2 a, vec2 b) {
+	vec2 ba = b - a;
+	float t = clamp(dot(q - a, ba) / dot(ba, ba), 0.0, 1.0);
+	return gauss(length(q - a - ba * t), 0.2) * smoothstep(0.2, 0.55, t) * smoothstep(1.0, 0.88, t);
+}
+
 void vertex() {
 	rest = CUSTOM0;
 	masks = COLOR;
 	fuv = UV;
+	// the bone this point mostly rides on; past its middle the joint is the next bone's
+	int mb = int(BONE_INDICES[0]);
+	float mw = BONE_WEIGHTS[0];
+	prox = 0.0;
+	for (int k = 0; k < 4; k++) {
+		int bi = int(BONE_INDICES[k]);
+		if (BONE_WEIGHTS[k] > mw) { mw = BONE_WEIGHTS[k]; mb = bi; }
+		if (bi == 2 || bi == 5 || bi == 8 || bi == 11) prox += BONE_WEIGHTS[k];
+	}
+	bool distal = mb == 4 || mb == 7 || mb == 10 || mb == 13 || mb == 16;
+	jflex = 0.0;
+	if (mb >= 2) jflex = (UV.x < 0.0 && !distal) ? flex[mb + 1] : flex[mb];
+	// the veins swell the skin itself (model space is cm), so as the hand grips they rise
+	// out of the back of the hand, change its outline and catch the light
+	float bk = smoothstep(0.6, 0.9, COLOR.b) * (CUSTOM0.w < 1.5 ? 1.0 : 0.0);
+	if (bk > 0.0) {
+		vec3 pv = CUSTOM0.xyz + vec3(seed * 13.1);
+		vec2 vq = CUSTOM0.xz + (vec2(vnoise(pv * 0.8), vnoise(pv * 0.8 + 17.0)) - 0.5) * 0.55;
+		float f = clamp(pump, 0.0, 1.0);
+		float vb = vein_net(vq, f, 1.35) * bk * smoothstep(-1.5, 0.5, CUSTOM0.z) * smoothstep(9.8, 8.6, CUSTOM0.z);
+		// in the sun's shadow pass (orthographic) keep only a little of the swelling: the shadow
+		// map is far coarser than a vein and would smear it into dark blotches
+		float in_shadow = PROJECTION_MATRIX[3][3] > 0.5 ? 0.2 : 1.0;
+		VERTEX += NORMAL * vb * (0.015 + 0.2 * f * f + 0.05 * f) * in_shadow;
+	}
 }
 
 void fragment() {
@@ -178,29 +303,61 @@ void fragment() {
 	float dorsal = masks.b;
 	float tip = masks.a;
 	bool finger = region > 1.5;
+	float back = smoothstep(0.6, 0.9, dorsal) * (region < 1.5 ? 1.0 : 0.0);   // back of hand / wrist
+	float px = length(fwidth(rest.xyz));                                       // cm per pixel
 
 	vec3 skin = skin_tone * (0.86 + 0.26 * vnoise(p * 1.3) + 0.08 * vnoise(p * 5.0));
 	skin = mix(skin, skin * vec3(1.15, 0.9, 0.82), clamp(jnt * 0.7 + (finger ? 0.18 : 0.0), 0.0, 1.0) * 0.55);
 	skin = mix(skin * vec3(1.45, 1.3, 1.18) + vec3(0.04, 0.025, 0.02), skin, smoothstep(0.15, 0.6, dorsal));
+	// sun spots and freckles on the back
+	float spot = smoothstep(0.66, 0.8, vnoise(p * 4.2 + 31.0)) * smoothstep(0.35, 0.75, vnoise(p * 0.9 + 5.0));
+	skin = mix(skin, skin * vec3(0.78, 0.68, 0.6), spot * smoothstep(0.45, 0.8, dorsal) * 0.55);
 
-	// knuckle wrinkles (lines across the finger at each joint, on the back)
-	float wr = (0.5 + 0.5 * sin(fuv.x * 24.0 + vnoise(p * 3.0) * 5.0)) * jnt * dorsal * (finger ? 1.0 : 0.0);
-	wr = smoothstep(0.55, 0.95, wr);
+	// knuckle wrinkles (lines across the finger at each joint, on the back): they bunch up
+	// deep when the finger is straight and pull out smooth and pale over a bent knuckle
+	float jf = clamp(jflex / 90.0, -0.4, 1.2);
+	float tight = smoothstep(0.15, 0.9, jf);
+	float slack = 1.0 + 0.7 * smoothstep(0.15, -0.2, jf);
+	float wr = (0.5 + 0.5 * sin(fuv.x * 24.0 * (1.0 - 0.25 * tight) + vnoise(p * 3.0) * 5.0)) * jnt * dorsal * (finger ? 1.0 : 0.0);
+	wr = smoothstep(0.55, 0.95, wr) * (1.0 - 0.8 * tight) * slack;
+	float blanch = jnt * smoothstep(0.5, 0.85, dorsal) * tight;
+	// creases on the palm side of each joint, folded deeper as it bends
+	float fold = jnt * (1.0 - smoothstep(0.25, 0.55, dorsal)) * (finger ? 1.0 : 0.0)
+		* max(1.0 - smoothstep(0.015, 0.06, abs(abs(fuv.x) - 0.08)), 0.7 * (1.0 - smoothstep(0.015, 0.05, abs(abs(fuv.x) - 0.3))))
+		* (0.35 + 0.9 * clamp(jf, 0.0, 1.0));
 	// big MCP knuckles: dry, ashy, wrinkled skin
 	float ash = smoothstep(0.5, 0.85, vnoise(p * 5.0 + 2.0)) * dorsal * clamp(jnt + 0.25, 0.0, 1.0);
-	// pores / fine creases everywhere
+	// fine criss-cross furrows and pores; faded out where they'd shimmer below a pixel
+	float relief_k = 1.0 - smoothstep(0.02, 0.05, px);
+	float furrow = (1.0 - smoothstep(0.0, 0.25, cell_edge(p * vec3(12.0, 12.0, 8.0)))) * relief_k * (0.4 + 0.6 * dorsal) * (1.0 - nail);
 	float pore = vnoise(p * 16.0);
-	float crease = 1.0 - smoothstep(0.0, 0.06, abs(vnoise(p * vec3(4.0, 4.0, 1.5)) - 0.5));
-	// hair on the back of the hand and wrist, lying toward the fingers
-	float hair = smoothstep(0.78, 0.92, vnoise(p * vec3(11.0, 11.0, 2.0))) * smoothstep(0.55, 0.85, dorsal)
-		* (region < 1.5 ? 1.0 : 0.0) * smoothstep(9.0, 6.0, p.z);
-	// veins over the back of the hand
-	float vein = (1.0 - smoothstep(0.0, 0.07, abs(vnoise(p * vec3(0.85, 0.85, 0.32) + 5.0) - 0.5)))
-		* smoothstep(0.6, 0.9, dorsal) * (region > 0.5 && region < 1.5 ? 1.0 : 0.0)
-		* smoothstep(0.5, 3.0, p.z) * smoothstep(9.5, 7.0, p.z);
+	// veins over the back of the hand, filling as the hand works; tendons taut over the
+	// back as the fingers straighten (and a little in a hard grip)
+	vec2 vq = rest.xz + (vec2(vnoise(p * 0.8), vnoise(p * 0.8 + 17.0)) - 0.5) * 0.55;
+	float fill = clamp(pump, 0.0, 1.0);
+	float vb = vein_net(vq, fill, 1.0) * back * smoothstep(-1.5, 0.5, rest.z) * smoothstep(9.8, 8.6, rest.z);
+	float vh = vb * (0.02 + 0.16 * fill * fill + 0.04 * fill);
+	vec4 tens = clamp(extend * 0.85 + 0.15 + 0.25 * fill, 0.0, 1.2);
+	float td = tens.x * tendon(rest.xz, vec2(0.9, 0.8), vec2(2.75, 9.5)) + tens.y * tendon(rest.xz, vec2(0.35, 0.8), vec2(0.9, 9.8))
+		+ tens.z * tendon(rest.xz, vec2(-0.25, 0.8), vec2(-1.05, 9.4)) + tens.w * tendon(rest.xz, vec2(-0.8, 1.0), vec2(-2.9, 8.5));
+	td *= back;
+	// hair: on the back of the hand and wrist, lying toward the fingers and the little-finger
+	// side, thickest by the wrist; short sparse hairs on the first finger joints
+	vec3 hr = vec3(0.0);
+	if (back > 0.01) {
+		vec2 hq = mat2(vec2(0.96, 0.29), vec2(-0.29, 0.96)) * rest.xz;
+		float dens = back * smoothstep(9.3, 6.5, rest.z) * (0.45 + 0.35 * smoothstep(1.5, -3.0, rest.x) + 0.2 * smoothstep(3.0, 0.0, rest.z));
+		vec3 h1 = hairs(hq + seed, dens * 0.8, 0.75, 0.0045, 0.16, 3.0);
+		vec3 h2 = hairs(hq * 1.13 + vec2(0.37, 0.71) + seed, dens * 0.6, 0.6, 0.004, 0.16, 11.0);
+		hr = h1.x >= h2.x ? h1 : h2;
+		hr.z = max(h1.z, h2.z);
+	} else if (prox > 0.5 && finger) {
+		float dens = smoothstep(0.65, 0.9, dorsal) * smoothstep(0.5, 0.9, prox) * smoothstep(0.45, 0.9, abs(fuv.x)) * 0.55;
+		hr = hairs(rest.xz * vec2(1.0, 1.0) + seed * 2.0, dens, 0.4, 0.0035, 0.15, 23.0);
+	}
 	// scratches, nicks and a few healed scars from work
-	float scr = (1.0 - smoothstep(0.0, 0.025, abs(vnoise(p * vec3(5.0, 1.0, 2.6) + 9.0) - 0.5)))
-		* step(0.7, vnoise(p * 0.7 + 3.0));
+	float scr = (1.0 - smoothstep(0.0, 0.02, abs(vnoise(p * vec3(5.0, 1.0, 2.6) + 9.0) - 0.5)))
+		* step(0.84, vnoise(p * 1.4 + 3.0)) * smoothstep(0.3, 0.7, dorsal);
 	float scar = smoothstep(0.86, 0.9, vnoise(p * 1.7 + 21.0)) * dorsal;
 	// grime: worked into creases and wrinkles, patchy dirt and sand dust
 	float grime = smoothstep(0.45, 0.9, vnoise(p * 1.9 + 7.0));
@@ -208,13 +365,14 @@ void fragment() {
 
 	vec3 col = skin;
 	col *= 1.0 - 0.08 * pore;
-	col *= 1.0 - 0.3 * wr - 0.06 * crease * dorsal;
+	col *= 1.0 - 0.3 * wr - 0.012 * furrow - 0.35 * fold;
 	col = mix(col, col * 1.25 + vec3(0.05, 0.045, 0.04), ash * 0.3);
-	col = mix(col, col * 0.45, hair * 0.75);
-	col = mix(col, col * vec3(0.8, 0.88, 0.95), vein * 0.35);
-	col = mix(col, vec3(0.55, 0.24, 0.17), scr * 0.45);
+	col = mix(col, col * vec3(1.2, 1.12, 1.04) + vec3(0.02, 0.015, 0.01), blanch * 0.35);
+	// blue-green blood under thin skin, a touch darker where the vein lies deep
+	col = mix(col, col * vec3(0.84, 0.9, 0.97), vb * (0.1 + 0.14 * fill));
+	col = mix(col, vec3(0.55, 0.24, 0.17), scr * 0.35);
 	col = mix(col, col * vec3(1.18, 1.08, 1.0), scar * 0.4);
-	col = mix(col, col * vec3(0.62, 0.55, 0.48), (grime * 0.25 + wr * 0.35 + crease * 0.08) * 0.6);
+	col = mix(col, col * vec3(0.62, 0.55, 0.48), (grime * 0.25 + wr * 0.35 + furrow * 0.04 + fold * 0.3) * 0.6);
 	col = mix(col, vec3(0.66, 0.55, 0.4), dust * 0.25);
 
 	// tattoo: soot ink under the skin, blurred and faded blue-green with age
@@ -222,10 +380,14 @@ void fragment() {
 	ink *= 0.75 + 0.25 * vnoise(p * 6.0);
 	col = mix(col, col * vec3(0.32, 0.42, 0.46), ink * 0.8);
 
+	// hair over everything on the skin: near-black at the root, sun-bleached at the tip
+	col *= 1.0 - 0.22 * hr.z;
+	vec3 hairc = mix(vec3(0.03, 0.022, 0.016), vec3(0.17, 0.11, 0.065), hr.y * hr.y);
+	col = mix(col, hairc, hr.x * 0.92);
+
 	// nails: thick, ridged, chipped, with dirt packed under the tips and ragged cuticles
 	float ridges = vnoise(vec3(fuv.y * 9.0, p.y * 0.2, 0.0) + p * 0.15);
 	vec3 nailc = vec3(0.47, 0.38, 0.3) * (0.8 + 0.3 * ridges);
-	nailc = mix(nailc, vec3(0.84, 0.74, 0.66), smoothstep(0.15, 0.0, nail - 0.85) * 0.0);
 	nailc = mix(nailc, vec3(0.5, 0.38, 0.3), smoothstep(0.6, 0.85, vnoise(p * 7.0)) * 0.5);   // stained
 	float under = smoothstep(0.4, 0.85, tip);
 	nailc = mix(nailc, vec3(0.12, 0.08, 0.05), under * 0.9);                                  // black dirt under the tip
@@ -235,14 +397,19 @@ void fragment() {
 
 	if (debug_view == 1) col = masks.rgb;
 	if (debug_view == 2) col = vec3(rest.w / 3.0, fract(rest.z * 0.2), 0.0);
+	if (debug_view == 3) col = vec3(clamp(jf, 0.0, 1.0), clamp(-jf * 3.0, 0.0, 1.0), prox * 0.5);
+	if (debug_view == 4) col = vec3(vb, td, hr.x);
 	ALBEDO = col;
-	ROUGHNESS = clamp(mix(0.58 - 0.08 * jnt + 0.15 * ash + 0.1 * dust, 0.45 + 0.3 * under, smoothstep(0.35, 0.75, nail)), 0.2, 1.0);
+	float nm = smoothstep(0.35, 0.75, nail);
+	float rough = 0.58 - 0.08 * jnt + 0.15 * ash + 0.1 * dust + 0.06 * furrow - 0.1 * blanch - 0.06 * vb;
+	ROUGHNESS = clamp(mix(mix(rough, 0.42, hr.x), 0.45 + 0.3 * under, nm), 0.2, 1.0);
 	SPECULAR = 0.35;
-	SSS_STRENGTH = 0.25 * (1.0 - smoothstep(0.35, 0.75, nail));
+	SSS_STRENGTH = 0.3 * (1.0 - nm);
 	BACKLIGHT = vec3(0.35, 0.12, 0.06) * 0.6;
 
-	float h = -wr * 0.03 - crease * 0.003 * dorsal + pore * 0.004 + vein * 0.05 - scr * 0.012
-		+ hair * 0.004 + ash * 0.006 + (ridges - 0.5) * 0.01 * nail - under * 0.01;
+	float h = -wr * 0.03 - furrow * 0.00035 + pore * 0.003 - scr * 0.008 - fold * 0.012
+		+ hr.x * 0.003 + ash * 0.006 + (ridges - 0.5) * 0.01 * nail - under * 0.01
+		+ (vh + td * (0.03 + 0.07 * dot(extend, vec4(0.25)) + 0.03 * fill)) * CMW;
 	vec3 dpdx = dFdx(VERTEX);
 	vec3 dpdy = dFdy(VERTEX);
 	vec3 r1v = cross(dpdy, NORMAL);
@@ -859,6 +1026,7 @@ func build_skin() -> void:
 	mat.set_shader_parameter("tattoo", 0 if style == Style.WHITE else 1)
 	mat.set_shader_parameter("seed", 0.0 if style == Style.WHITE else 3.7)
 	mat.set_shader_parameter("skin_tone", Vector3(0.33, 0.19, 0.1) if style == Style.WHITE else Vector3(0.26, 0.15, 0.08))
+	skin_mat = mat
 	_skinned(mesh, mat)
 
 
@@ -1329,6 +1497,7 @@ func set_pose_dict(d: Dictionary, snap := false) -> void:
 		for i in pose_tgt:
 			pose_cur[i] = pose_tgt[i]
 		_apply_pose()
+		_update_skin()
 
 
 ## Shape of the hand holding something of half-width r (cm) at GRASP_C: the index and
@@ -1424,6 +1593,43 @@ func _apply_pose() -> void:
 			continue
 		var v: Vector2 = pose_cur[i]
 		skel.set_bone_pose_rotation(i, rest_rot[i] * Quaternion(Vector3.RIGHT, deg_to_rad(v.x)) * Quaternion(Vector3.UP, deg_to_rad(v.y)))
+
+
+## Hand the skin shader the pose: every joint's bend (knuckle wrinkles), how straight each
+## finger is (extensor tendons) and how full the veins are. The veins rise within a fraction
+## of a second of the hand clenching and sink when it lets go; on top of that, repeated work
+## pumps them up for a while, so they stay a little proud after a hard grip. delta < 0 snaps.
+func _update_skin(delta := -1.0) -> void:
+	if skin_mat == null:
+		return
+	var fl := PackedFloat32Array()
+	fl.resize(18)
+	for i in pose_cur:
+		if i < 18:
+			fl[i] = (pose_cur[i] as Vector2).x
+	var grip := 0.0
+	var ext := Vector4.ZERO
+	var k := 0
+	# index and middle do the gripping; the ring and little finger often just tuck away
+	var weight := [0.35, 0.35, 0.15, 0.15]
+	for f in ["index", "middle", "ring", "pinky"]:
+		var a: float = fl[bones[f + "_0"]]
+		var b: float = fl[bones[f + "_1"]]
+		grip += clampf((a + b) / 170.0, 0.0, 1.0) * weight[k]
+		ext[k] = 0.7 * smoothstep(18.0, -6.0, a) + 0.3 * smoothstep(14.0, -4.0, b)
+		k += 1
+	# a firm grip, or every finger stretched hard, makes the veins stand up
+	var spread := (ext.x + ext.y + ext.z + ext.w) / 4.0 * smoothstep(0.4, 0.9, (ext.x + ext.w) / 2.0)
+	var want := clampf(smoothstep(0.18, 0.7, grip) + 0.4 * spread, 0.0, 1.0)
+	if delta < 0.0:
+		tension = want
+		pump = want * 0.5
+	else:
+		tension = lerpf(tension, want, 1.0 - exp(-(9.0 if want > tension else 5.0) * delta))
+		pump = move_toward(pump, tension, delta * (0.6 if tension > pump else 0.15))
+	skin_mat.set_shader_parameter("flex", fl)
+	skin_mat.set_shader_parameter("extend", ext)
+	skin_mat.set_shader_parameter("pump", clampf(0.08 + 0.85 * tension + 0.3 * pump, 0.0, 1.0))
 
 
 ## Grip point in hand-local cm: an explicit one while holding something, otherwise
@@ -1594,6 +1800,7 @@ func _process(delta: float) -> void:
 	for i in pose_tgt:
 		pose_cur[i] = (pose_cur[i] as Vector2).lerp(pose_tgt[i], k)
 	_apply_pose()
+	_update_skin(delta)
 	_place_now()
 	_swing_cloth(delta)
 	_update_sleeve()
