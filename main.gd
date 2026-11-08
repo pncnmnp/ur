@@ -1902,6 +1902,7 @@ func eat_date() -> void:
 	var pitch: float = plan.pitch
 	var half_w: float = plan.half_w
 	# in from beyond his shoulder, fingers and thumb opening as the hand comes over the bowl
+	h.effort = 0.0
 	h.set_pose("relaxed", true)
 	h.aim_yaw = 0.0
 	h.aim_roll = 0.0
@@ -1920,6 +1921,7 @@ func eat_date() -> void:
 	# the fingers close on it; it is soft, and gives a little
 	h.pose_rate = 12.0
 	h.set_pose_dict(date_pose(h, half_w * 0.9, pitch))
+	h.effort = 0.45
 	await get_tree().create_timer(randf_range(0.2, 0.28)).timeout
 	play_sfx("date_pick", c)
 	h.pose_rate = 9.0
@@ -1961,6 +1963,7 @@ func spit_stone(wait := -1.0) -> void:
 	h.aim_yaw = 0.0
 	h.aim_roll = 0.0
 	h.set_pose_dict(h.grasp_level(0.42, pitch), true)
+	h.effort = 0.35
 	h.place(offstage(h, spot), fwd, 10.0)
 	h.visible = true
 	# the stone lies across his fingertips, pinched by its middle
@@ -1973,6 +1976,7 @@ func spit_stone(wait := -1.0) -> void:
 	h.placed.disconnect(follow)
 	h.pose_rate = 16.0
 	h.set_pose_dict(h.grasp_level(1.4, pitch))
+	h.effort = 0.0
 	# it drops to the sand and lies on its side
 	var from := pit.global_transform
 	var rest_b := (Basis(Vector3.UP, randf() * TAU) * Basis(Vector3.BACK, randf_range(-0.6, 0.6) + (PI if randf() < 0.5 else 0.0))) \
@@ -2160,6 +2164,7 @@ func hand_enter(h: UrHand, toward: Vector3) -> void:
 		return
 	# start just beyond his shoulder, out of view
 	var start := offstage(h, toward)
+	h.effort = 0.0
 	h.set_pose("relaxed", true)
 	h.aim_yaw = 0.0
 	h.place(start, hand_fwd(h, toward), 10.0)
@@ -2261,8 +2266,10 @@ func hand_take(h: UrHand, node: Node3D, quick := false) -> void:
 	await hand_move(h, at + Vector3(0, 0.03, 0), randf_range(0.2, 0.28) * k, 0.0, 32.0)
 	h.pose_rate = 16.0
 	h.set_pose_dict(h.grasp_pose(UrHand.STONE_GRIP_R))
+	h.effort = 0.9
 	await get_tree().create_timer(randf_range(0.16, 0.22) * k).timeout
 	h.pose_rate = 9.0
+	h.effort = 0.6        # once it is up, a pebble is light to carry
 	play_sfx("stone_lift", at)
 
 
@@ -2274,6 +2281,7 @@ func hand_let_go(h: UrHand, node: Node3D, land := "") -> void:
 		play_sfx("stone_place", node.position, -12.0)
 	h.pose_rate = 16.0
 	h.set_pose_dict(h.grasp_pose(UrHand.STONE_OPEN_R))
+	h.effort = 0.0
 	settle(node)
 	await get_tree().create_timer(0.12).timeout
 	h.pose_rate = 9.0
@@ -2281,6 +2289,7 @@ func hand_let_go(h: UrHand, node: Node3D, land := "") -> void:
 
 
 func hand_leave(h: UrHand) -> void:
+	h.effort = 0.0
 	h.set_pose("relaxed")
 	var end := offstage(h, h.grip_target)
 	var my := h.move_id + 1
@@ -2354,6 +2363,7 @@ func hand_throw(p: int) -> void:
 		# thumb, index and middle pads close on it and stop as they meet its faces
 		for d in PINCH_DIGITS:
 			grip.drive(d, h.pose_cur.duplicate(), plan.touch, 6.0)
+		h.effort = 0.85
 		var t := 0.0
 		while t < 0.4 and not grip.closed(PINCH_DIGITS):
 			await get_tree().physics_frame
@@ -2378,6 +2388,7 @@ func hand_throw(p: int) -> void:
 		if e != epoch:
 			return
 		grip.loosen(i, POCKET[k], 500.0)
+		h.effort = 0.3 if k > 0 else 0.15   # only the curled fingers keeping them now
 		if k > 0:
 			# it meets the dice already in his palm: one muffled click (skin damps it)
 			play_sfx("die_die", h.grip_world(), randf_range(-17.0, -13.0), 0.1)
@@ -2397,6 +2408,7 @@ func hand_throw(p: int) -> void:
 	var now := h.pose_cur.duplicate()
 	for d in UrHand.DIGITS:
 		grip.drive(d, now, fist, 2.0)
+	h.effort = 1.0
 	for k in order.size():
 		grip.pull[order[k]] = 400.0
 	await get_tree().create_timer(0.2).timeout
@@ -2450,6 +2462,7 @@ func hand_throw(p: int) -> void:
 	if e != epoch:
 		return
 	grip.let_go_all()
+	h.effort = 0.0
 	grip.end()
 	dice_hand = null
 	throw_dice(dice_centroid(), dir, true)

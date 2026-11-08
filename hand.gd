@@ -48,9 +48,13 @@ var grip_override: Variant = null  # hand-local cm point to place at the target 
 var pose_cache := {}             # name -> {bone: Vector2}
 var sleeve_mat: ShaderMaterial
 var skin_mat: ShaderMaterial
-var tension := 0.0              # how hard the hand is gripping right now (0..1, follows the pose quickly)
+var effort := 0.0               # how hard the game says the hand is working right now: 0 at ease or
+                                 # open, ~0.4 holding something lightly, 1 squeezing (set by main.gd at
+                                 # each grip and release; finger curl alone is only shape, not effort)
+var tension := 0.0              # how hard the hand is gripping right now (0..1, follows effort quickly)
 var pump := 0.0                 # blood the hand's work has pumped into it (0..1, builds while gripping,
-                                 # ebbs over half a minute)
+                                 # ebbs over ~15 s)
+const PUMP_EBB := 0.065          # how fast the pump ebbs (per second)
 var low := 0.5                  # how far the hand hangs down, so blood pools in it (0 lifted .. 1 low)
 var twist_rest := 0.3            # forearm twist (radians) in the arm's natural carriage
 var sway := Vector3.ZERO         # how far the loose cloth trails behind (world)
@@ -1666,9 +1670,11 @@ func _apply_pose() -> void:
 ## Hand the skin shader the pose: every joint's bend (knuckle wrinkles), how straight each
 ## finger is (extensor tendons) and how full the veins on the back of the hand are.
 ## The veins behave like real ones: blood pools in a hand held low, so they show even at
-## rest, and drains out of a lifted one within a second or two; gripping squeezes more blood
-## into them at once, and work pumps them up so they stay swollen well after the hand lets
-## go, ebbing over half a minute. delta < 0 snaps the quick parts.
+## rest, and drains out of a lifted one within a second or two; gripping squeezes blood
+## into them at once (they stand up within a fraction of a second and sink again as soon as
+## the hand lets go), and sustained work leaves them a little fuller for a while, ebbing over
+## ~15 s. Grip carries most of the swell so it always reads; the pump is only a baseline and
+## the terms add up to at most 1, so nothing saturates. delta < 0 snaps the quick parts.
 func _update_skin(delta := -1.0) -> void:
 	if skin_mat == null:
 		return
@@ -1688,9 +1694,11 @@ func _update_skin(delta := -1.0) -> void:
 		grip += clampf((a + b) / 170.0, 0.0, 1.0) * weight[k]
 		ext[k] = 0.7 * smoothstep(18.0, -6.0, a) + 0.3 * smoothstep(14.0, -4.0, b)
 		k += 1
-	# a firm grip, or every finger stretched hard, is effort
+	# effort is what the hand is doing (squeezing a die, holding a fist of dice), not the
+	# shape it is in: it comes curled and pre-shaped to most things, so curl and a hard
+	# stretch add only a little on top
 	var spread := (ext.x + ext.y + ext.z + ext.w) / 4.0 * smoothstep(0.4, 0.9, (ext.x + ext.w) / 2.0)
-	var want := clampf(smoothstep(0.18, 0.7, grip) + 0.4 * spread, 0.0, 1.0)
+	var want := clampf(effort + 0.15 * smoothstep(0.3, 0.9, grip) + 0.15 * spread, 0.0, 1.0)
 	# how low the wrist is against the shoulder: down at the board the veins fill, lifted
 	# (rattling and throwing the dice) they empty
 	var drop_cm := (global_position.y - shoulder.y) / CM
@@ -1699,11 +1707,11 @@ func _update_skin(delta := -1.0) -> void:
 		tension = want
 		low = want_low
 	else:
-		tension = lerpf(tension, want, 1.0 - exp(-(9.0 if want > tension else 5.0) * delta))
-		low = lerpf(low, want_low, 1.0 - exp(-1.6 * delta))
-		pump = clampf(pump + delta * (0.15 * tension - 0.025), 0.0, 1.0)
+		tension = lerpf(tension, want, 1.0 - exp(-(10.0 if want > tension else 6.0) * delta))
+		low = lerpf(low, want_low, 1.0 - exp(-2.2 * delta))
+		pump = clampf(pump + delta * (0.12 * tension - PUMP_EBB), 0.0, 1.0)
 	# a raised hand drains even after hard work; a low one shows all of it
-	var fill := 0.4 * low + 0.3 * tension + 0.5 * pump * (0.3 + 0.7 * low)
+	var fill := 0.33 * low + 0.47 * tension + 0.2 * pump * (0.3 + 0.7 * low)
 	skin_mat.set_shader_parameter("flex", fl)
 	skin_mat.set_shader_parameter("extend", ext)
 	skin_mat.set_shader_parameter("pump", clampf(fill, 0.0, 1.0))
@@ -1882,7 +1890,7 @@ func _aim_basis(z: Vector3, up := Vector3.UP) -> Basis:
 func _process(delta: float) -> void:
 	if not visible:
 		swing_live = false
-		pump = maxf(pump - 0.025 * delta, 0.0)
+		pump = maxf(pump - PUMP_EBB * delta, 0.0)
 		return
 	var k := 1.0 - exp(-pose_rate * delta)
 	for i in pose_tgt:
