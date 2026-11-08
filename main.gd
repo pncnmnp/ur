@@ -19,6 +19,8 @@ const LIFT := 0.55          # height of a stone carried by the mouse
 const TRAY := Rect2(-8.6, -2.4, 3.6, 4.8)   # (x, z) rectangle of the dice tray
 const TRAY_RIM_H := 0.42     # height of the tray's rim boards (world)
 const TRAY_RIM_T := 0.3      # and their thickness
+const DUSTED := 2           # render layer of the surfaces wind-blown sand settles on (decals)
+const SAND_WIND := Vector2(0.94, 0.34)   # the way the wind blows over the table (xz): drifts and dust
 const DIE_R := 0.30         # distance from die centre to a corner (four fit inside a closed fist)
 const DIE_LOOK_R := 0.52    # size the die's markings were drawn for (the shader is scaled to it)
 const DIE_K := 14.0         # sharpness of the rounded tetrahedron
@@ -197,15 +199,22 @@ void fragment() {
 
 const SAND_SHADER := """
 shader_type spatial;
-// Desert sand the board rests on. Sand mounds up against everything placed on it
-// (rects = centre.xz, half-size.xz) and rolls into low dunes further away.
+// Desert sand the board rests on (rects = centre.xz, half-size.xz, rect_cs = cos/sin of
+// each one's yaw, rect_top = height of each object's top). Nothing just sits on sand: the
+// wind banks it up against every edge, in uneven drifts that are deeper and run further
+// out on the side facing the wind, and scours a shallow hollow in the lee. Where the
+// drifted sand meets the wood or clay there is a dark crease, and the drift itself is
+// smooth, fine sand, the ripples blown out of it. Further away the sand rolls into low dunes.
 uniform sampler2D alb_tex : source_color, filter_linear_mipmap_anisotropic, repeat_enable;
 uniform sampler2D nrm_tex : hint_normal, filter_linear_mipmap_anisotropic, repeat_enable;
 uniform vec4 rects[8];
-uniform float rect_rot[8];   // yaw of each rect (radians)
+uniform vec2 rect_cs[8];
+uniform float rect_top[8];   // world height of each object's top
 uniform int rect_count = 0;
 uniform float tile = 4.0;
+uniform vec2 wind = vec2(0.94, 0.34);   // the way the wind blows (xz, unit)
 varying vec3 wp;
+varying float drift;         // how much of this sand is drifted against something (0..1)
 
 float hash2(vec2 p) {
 	p = fract(p * vec2(123.34, 456.21));
@@ -218,37 +227,70 @@ float vnoise2(vec2 p) {
 	f = f * f * (3.0 - 2.0 * f);
 	return mix(mix(hash2(i), hash2(i + vec2(1, 0)), f.x), mix(hash2(i + vec2(0, 1)), hash2(i + vec2(1, 1)), f.x), f.y);
 }
-float sd_rect(vec2 p, vec4 r, float a) {
-	vec2 q = p - r.xy;
-	float c = cos(a);
-	float s = sin(a);
-	q = vec2(q.x * c - q.y * s, q.x * s + q.y * c);   // into the rect's own frame
-	vec2 d = abs(q) - r.zw;
-	return length(max(d, 0.0)) + min(max(d.x, d.y), 0.0);
-}
-float height_at(vec2 p) {
-	float d = 1e6;
+// nearest object: (distance, outward normal of its nearest side xz, its top height)
+vec4 nearest(vec2 p) {
+	vec4 best = vec4(1e6, 0.0, 1.0, 1.0);
 	for (int i = 0; i < 8; i++) {
 		if (i >= rect_count) break;
-		d = min(d, sd_rect(p, rects[i], rect_rot[i]));
+		vec2 cs = rect_cs[i];
+		vec2 q = p - rects[i].xy;
+		q = vec2(q.x * cs.x - q.y * cs.y, q.x * cs.y + q.y * cs.x);   // into its own frame
+		vec2 d = abs(q) - rects[i].zw;
+		float dist = length(max(d, 0.0)) + min(max(d.x, d.y), 0.0);
+		if (dist < best.x) {
+			vec2 nl = d.x > d.y ? vec2(sign(q.x), 0.0) : vec2(0.0, sign(q.y));
+			if (d.x > 0.0 && d.y > 0.0) nl = normalize(d * sign(q));
+			best = vec4(dist, nl.x * cs.x + nl.y * cs.y, -nl.x * cs.y + nl.y * cs.x, rect_top[i]);
+		}
 	}
-	if (d < -0.15) return -0.25; // hidden under the object
-	float o = max(d, 0.0);
-	float berm = 0.034 * exp(-o / 0.28) + 0.014 * exp(-o / 0.07);
-	float dunes = (vnoise2(p * 0.11) - 0.5) * 1.1 + (vnoise2(p * 0.37 + 7.0) - 0.5) * 0.18;
-	return berm + smoothstep(1.2, 7.0, o) * dunes;
+	return best;
+}
+float drift_amount(vec2 p, vec4 nb) {
+	float ww = clamp(dot(nb.yz, -wind), 0.0, 1.0);   // this side faces the wind
+	float reach = 0.16 + 0.32 * ww + 0.12 * vnoise2(p * 1.7 + 3.0);
+	return exp(-max(nb.x, 0.0) / reach);
+}
+float dunes_at(vec2 p, float o) {
+	float k = smoothstep(1.2, 7.0, o);
+	if (k <= 0.0) return 0.0;
+	return k * ((vnoise2(p * 0.11) - 0.5) * 1.1 + (vnoise2(p * 0.37 + 7.0) - 0.5) * 0.18);
+}
+// the sand's height at p, given the nearest object there
+float height_at(vec2 p, vec4 nb) {
+	if (nb.x < -0.15) return -0.25; // hidden under the object
+	float o = max(nb.x, 0.0);
+	if (o > 2.0) return dunes_at(p, o);
+	float face = dot(nb.yz, -wind);
+	float ww = clamp(face, 0.0, 1.0);
+	float lee = clamp(-face, 0.0, 1.0);
+	// uneven along the edge: lumps a hand-width apart, and the odd bigger drift; sized to
+	// what it is drifted against - against a plank it laps at the top edge, against the
+	// tray's rim it banks up a good way
+	float lump = vnoise2(p * 2.6) * 0.65 + vnoise2(p * 7.0 + 5.0) * 0.35;
+	float big = smoothstep(0.55, 0.85, vnoise2(p * 0.9 + 17.0));
+	float h_obj = max(nb.w, 0.03);
+	float amp = min(h_obj * (0.35 + 0.45 * lump + 0.4 * big) * (0.55 + 0.75 * ww), 0.24);
+	float berm = amp * drift_amount(p, nb) + 0.25 * h_obj * exp(-o / 0.05);
+	// the lee: a shallow scoop right against it, then a low tail further out
+	berm -= lee * 0.014 * exp(-o / 0.1) * (1.0 - exp(-o / 0.03));
+	berm += lee * 0.01 * exp(-pow((o - 0.45) / 0.3, 2.0));
+	berm = min(berm, nb.w - 0.012);   // never over the top of what it is drifted against
+	return berm + dunes_at(p, o);
 }
 void vertex() {
 	vec3 w = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
-	float e = 0.04;
-	float h = height_at(w.xz);
-	float sx = (height_at(w.xz + vec2(e, 0)) - height_at(w.xz - vec2(e, 0))) / (2.0 * e);
-	float sz = (height_at(w.xz + vec2(0, e)) - height_at(w.xz - vec2(0, e))) / (2.0 * e);
+	float e = 0.02;
+	vec4 nb = nearest(w.xz);
+	float h = height_at(w.xz, nb);
+	// slope: the same nearest object a step away (it does not change over 2 cm)
+	float sx = (height_at(w.xz + vec2(e, 0), nearest(w.xz + vec2(e, 0))) - h) / e;
+	float sz = (height_at(w.xz + vec2(0, e), nearest(w.xz + vec2(0, e))) - h) / e;
 	VERTEX.y += h;
 	NORMAL = normalize(vec3(-sx, 1.0, -sz));
 	TANGENT = normalize(vec3(1.0, sx, 0.0));
 	BINORMAL = normalize(cross(NORMAL, TANGENT));
 	wp = w + vec3(0.0, h, 0.0);
+	drift = nb.x < -0.15 ? 0.0 : drift_amount(w.xz, nb);
 }
 void fragment() {
 	vec2 uv = wp.xz / tile;
@@ -257,9 +299,18 @@ void fragment() {
 	float macro = vnoise2(wp.xz * 0.22) * 0.6 + vnoise2(wp.xz * 0.8 + 3.0) * 0.4;
 	vec3 col = mix(a, b, 0.3) * mix(0.9, 1.07, macro);
 	col = mix(col, col * vec3(1.06, 0.96, 0.88), vnoise2(wp.xz * 0.13 + 11.0) * 0.6);
+	// drifted sand is fine and fresh: a shade paler and smoother, ripples blown away
+	float dr = smoothstep(0.15, 0.85, drift);
+	col *= mix(1.0, 1.05, dr);
+	// the crease where the sand meets the object: it sees little sky and little bounce
+	float d = max(nearest(wp.xz).x, 0.0);
+	float crease = 1.0 - smoothstep(0.0, 0.06, d);
+	col *= 1.0 - 0.38 * crease * crease;
 	ALBEDO = col;
+	AO = 1.0 - 0.7 * (1.0 - smoothstep(0.0, 0.16, d));
+	AO_LIGHT_AFFECT = 0.45;
 	NORMAL_MAP = texture(nrm_tex, uv).rgb;
-	NORMAL_MAP_DEPTH = 1.0;
+	NORMAL_MAP_DEPTH = mix(1.0, 0.25, dr);
 	ROUGHNESS = 0.94;
 	SPECULAR = 0.3;
 }
@@ -362,7 +413,7 @@ func add_plane(size: Vector2, at: Vector3, m: Material, yaw := 0.0, parent: Node
 
 ## A wooden slab with a carved panel on top, placed by a layout transform: the slab
 ## has worn, rounded edges; the panel covers only its flat top.
-func add_slab(size: Vector2, xf: Transform3D, slab_mat: Material, panel: Material, yaw := 0.0) -> void:
+func add_slab(size: Vector2, xf: Transform3D, slab_mat: Material, panel: Material, dust: String, yaw := 0.0) -> void:
 	var root := Node3D.new()
 	root.transform = xf
 	add_child(root)
@@ -370,8 +421,27 @@ func add_slab(size: Vector2, xf: Transform3D, slab_mat: Material, panel: Materia
 	slab.mesh = rounded_box(Vector3(size.x, 0.14, size.y), SLAB_R)
 	slab.material_override = slab_mat
 	slab.position = Vector3(0, BY - 0.072, 0)
+	slab.layers = 1 | DUSTED
 	root.add_child(slab)
-	add_plane(size - Vector2(2, 2) * SLAB_R, Vector3(0, BY, 0), panel, yaw, root)
+	var top := add_plane(size - Vector2(2, 2) * SLAB_R, Vector3(0, BY, 0), panel, yaw, root)
+	top.layers = 1 | DUSTED
+	add_dust(dust, root, Vector3(size.x + 0.02, 0.24, size.y + 0.02), Vector3(0, BY, 0))
+
+
+## Wind-blown sand lying on a piece of wood or clay (assets/dust_<name>.png, made by
+## tools/make_dust.py): a decal over its top, `size` (x, height, z) centred at `at` in
+## `parent`'s frame. It settles only on surfaces in the DUSTED layer - the board, strips,
+## plates, tray and tablet - never on the stones, dice or hands moving over them.
+func add_dust(name: String, parent: Node3D, size: Vector3, at: Vector3) -> void:
+	var dc := Decal.new()
+	dc.texture_albedo = tex("res://assets/dust_%s.png" % name)
+	dc.size = size
+	dc.position = at
+	dc.cull_mask = DUSTED
+	dc.normal_fade = 0.35       # a little down the rounded edges, none on the sides
+	dc.upper_fade = 0.1
+	dc.lower_fade = 0.1
+	parent.add_child(dc)
 
 
 func place_xf(x: float, z: float, yaw_deg: float) -> Transform3D:
@@ -590,6 +660,9 @@ func build_environment() -> void:
 	env.ssao_enabled = true
 	env.ssao_radius = 0.6
 	env.ssao_intensity = 2.2
+	# where things meet they shade each other even in full sun: the crease under a plank,
+	# a stone's foot on the wood (not only the sky light, which is weak here)
+	env.ssao_light_affect = 0.3
 	# bounce light: the bright sand throws warm light back up onto the board sides,
 	# the inner walls of the tray, the stones and the dice
 	env.sdfgi_enabled = true
@@ -707,11 +780,11 @@ func build_board() -> void:
 
 	var slab_mat := wood_mat(Color(0.75, 0.62, 0.5), 0.45)
 	# the carved board, the reserve strips (near = human, far = AI) and the home plates
-	add_slab(Vector2(8.5, 3.5), board_xf(), slab_mat, panel_mat("board"))
+	add_slab(Vector2(8.5, 3.5), board_xf(), slab_mat, panel_mat("board"), "board")
 	for p in 2:
 		var yaw := 0.0 if p == HUMAN else 180.0
-		add_slab(Vector2(7.4, 0.9), strip_xf(p), slab_mat, panel_mat("strip"), yaw)
-		add_slab(HOME_SIZE, plate_xf(p), slab_mat, panel_mat("plate"), yaw)
+		add_slab(Vector2(7.4, 0.9), strip_xf(p), slab_mat, panel_mat("strip"), "strip", yaw)
+		add_slab(HOME_SIZE, plate_xf(p), slab_mat, panel_mat("plate"), "plate", yaw)
 
 
 ## Sand ground, mounded against the board pieces and the dice tray.
@@ -734,21 +807,71 @@ func build_sand() -> void:
 	])
 	var rots := PackedFloat32Array([BOARD_YAW, STRIP_PLACE[HUMAN].z, STRIP_PLACE[AI].z,
 		PLATE_NUDGE[HUMAN].z, PLATE_NUDGE[AI].z, TRAY_NUDGE.z, 4.0])
-	for i in rots.size():
-		rots[i] = deg_to_rad(rots[i])
+	var cs := PackedVector2Array()
+	for r in rots:
+		cs.append(Vector2(cos(deg_to_rad(r)), sin(deg_to_rad(r))))
 	sm.set_shader_parameter("rects", rects)
-	sm.set_shader_parameter("rect_rot", rots)
+	sm.set_shader_parameter("rect_cs", cs)
+	sm.set_shader_parameter("rect_top", PackedFloat32Array([BY, BY, BY, BY, BY, TRAY_RIM_H, TABLET_POS.y + 0.06]))
 	sm.set_shader_parameter("rect_count", rects.size())
+	sm.set_shader_parameter("wind", SAND_WIND)
 	var mi := MeshInstance3D.new()
-	var pm := PlaneMesh.new()
-	pm.size = Vector2(56, 40)
-	pm.subdivide_width = 700
-	pm.subdivide_depth = 500
-	mi.mesh = pm
+	mi.mesh = sand_mesh(Rect2(-29.5, -24.0, 56.0, 40.0), Rect2(-10.6, -5.2, 18.2, 12.0), 0.045, 0.12)
 	mi.material_override = sm
-	mi.position = Vector3(-1.5, 0, -4)
 	mi.extra_cull_margin = 1.0
 	add_child(mi)
+
+
+## A flat grid for the sand over `area` (x, z): `fine` spacing over `near` (the table,
+## where the drifts against the board and tray need it), `coarse` beyond.
+func sand_mesh(area: Rect2, near: Rect2, fine: float, coarse: float) -> ArrayMesh:
+	var axis := func(lo: float, hi: float, nlo: float, nhi: float) -> PackedFloat32Array:
+		var out := PackedFloat32Array()
+		var x := lo
+		while x < hi:
+			out.append(x)
+			x += fine if x >= nlo - coarse and x < nhi + coarse else coarse
+		out.append(hi)
+		return out
+	var xs: PackedFloat32Array = axis.call(area.position.x, area.end.x, near.position.x, near.end.x)
+	var zs: PackedFloat32Array = axis.call(area.position.y, area.end.y, near.position.y, near.end.y)
+	var verts := PackedVector3Array()
+	var uvs := PackedVector2Array()
+	verts.resize(xs.size() * zs.size())
+	uvs.resize(verts.size())
+	var k := 0
+	for z in zs:
+		for x in xs:
+			verts[k] = Vector3(x, 0.0, z)
+			uvs[k] = Vector2(x, z)
+			k += 1
+	var idx := PackedInt32Array()
+	var w := xs.size()
+	idx.resize((xs.size() - 1) * (zs.size() - 1) * 6)
+	k = 0
+	for j in zs.size() - 1:
+		for i in w - 1:
+			var a := j * w + i
+			idx[k] = a
+			idx[k + 1] = a + 1
+			idx[k + 2] = a + w
+			idx[k + 3] = a + 1
+			idx[k + 4] = a + w + 1
+			idx[k + 5] = a + w
+			k += 6
+	var arr := []
+	arr.resize(Mesh.ARRAY_MAX)
+	arr[Mesh.ARRAY_VERTEX] = verts
+	arr[Mesh.ARRAY_TEX_UV] = uvs
+	var nrm := PackedVector3Array()
+	nrm.resize(verts.size())
+	nrm.fill(Vector3.UP)
+	arr[Mesh.ARRAY_NORMAL] = nrm
+	arr[Mesh.ARRAY_INDEX] = idx
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+	mesh.custom_aabb = AABB(Vector3(area.position.x, -2.0, area.position.y), Vector3(area.size.x, 4.0, area.size.y))
+	return mesh
 
 
 ## The tray's leather lining as a real surface: gently pillowed, and bulging up where
@@ -949,7 +1072,11 @@ func build_tray() -> void:
 	lm.mesh = leather_mesh(TRAY.size + Vector2(0.16, 0.16))
 	lm.material_override = leather
 	lm.position = Vector3(TRAY.get_center().x, 0.012, TRAY.get_center().y)
+	lm.layers = 1 | DUSTED
 	tray_root.add_child(lm)
+	# sand blown over the rim lies on the boards' tops and along the foot of the walls inside
+	add_dust("tray", tray_root, Vector3(TRAY.size.x + 2 * TRAY_RIM_T, 1.0, TRAY.size.y + 2 * TRAY_RIM_T),
+		Vector3(TRAY.get_center().x, 0.3, TRAY.get_center().y))
 
 	# rim: four weathered planks with rounded edges, grain running lengthwise.
 	# The long side boards overlap the ends and are pinned with dowels.
@@ -981,6 +1108,7 @@ func build_tray() -> void:
 		board.position = Vector3(w[1].x, (rim_h if wi < 2 else rim_h - 0.02) / 2.0, w[1].z)
 		if wi < 2:
 			board.rotation_degrees.y = 90.0
+		board.layers = 1 | DUSTED
 		tray_root.add_child(board)
 		if wi < 2:
 			for zend in [TRAY.position.y - t / 2, TRAY.end.y + t / 2]:
@@ -1282,7 +1410,9 @@ func build_tablet() -> void:
 	mi.material_override = tablet_mat
 	mi.position = TABLET_POS
 	mi.rotation_degrees = Vector3(8, 4, 0) # propped toward the players, half sunk in the sand
+	mi.layers = 1 | DUSTED
 	add_child(mi)
+	add_dust("tablet", mi, Vector3(TABLET_SIZE.x, 0.3, TABLET_SIZE.z), Vector3(0, TABLET_SIZE.y / 2, 0))
 
 
 func build_ui() -> void:
