@@ -201,20 +201,42 @@ def stone_lift(rng):
     return band(y, lo=150, hi=2500)
 
 
+G_GRIT = 1.1       # how much of the dry grain of the catches is heard, against the wood
+
+
 def stone_slide(rng):
-    """A pebble pushed along the wooden board (1.6 s, played for as long as the slide
-    lasts): a soft, low friction hiss with the faint grain of tiny stick-slip catches.
-    Deliberately dull - no high squeak - since the stone is rough and the wood is old."""
-    dur = 1.6
+    """A pebble pushed along the old wooden board (2.4 s, played for as long as the slide
+    lasts; the game swells and fades it with the stone's speed). Rough stone dragged over
+    wood is a dry, low grinding rumble, not a hiss: it sticks and slips, many hundreds of
+    tiny catches a second, bunched where the grain is rougher, and each catch knocks the
+    board's low, heavily damped wood modes (it lies in sand, so nothing rings on). The
+    stone's own ring barely shows, and above ~2 kHz there is almost nothing."""
+    dur = 2.4
     t = taxis(dur)
     n = len(t)
-    body = band(rng.standard_normal(n), lo=180, hi=1400, order=2)
+    # roughness of the wood under the stone as it travels: slow, uneven swells
+    rough = band(rng.standard_normal(n), hi=14, order=2)
+    rough = np.clip(0.55 + rough / (np.abs(rough).max() + 1e-9) * 0.45, 0.1, 1.0)
+    # stick-slip catches: a Poisson train, denser and harder where it is rough
+    rate = rng.uniform(180, 260) * (0.6 + 0.9 * rough)
     imp = np.zeros(n)
-    k = rng.integers(0, n, size=int(dur * 260))
-    imp[k] = rng.uniform(0.3, 1.0, size=len(k))
-    grain = band(imp, lo=400, hi=2200)
-    wob = 0.75 + 0.25 * np.sin(2 * np.pi * t * rng.uniform(2.5, 4.0) + rng.uniform(0, 6))
-    y = (body + 0.6 * grain) * wob
+    hits = rng.random(n) < rate / SR
+    imp[hits] = rng.lognormal(0.0, 0.55, hits.sum()) * rough[hits]
+    # the wood answers each catch: low local modes, heavily damped
+    wood = jit(rng, [210, 330, 470, 640, 880, 1150], 0.1)
+    k = modes(0.04, wood, [q_tau(f, rng.uniform(4, 8)) for f in wood], [0.45, 0.75, 1.0, 0.95, 0.7, 0.45])
+    k += 0.12 * stone_ring(rng, 0.04, (6, 10))[: len(k)]
+    k = contact(k, 0.00035)           # rough stone on old wood: a blunt contact
+    catches = np.convolve(imp, k)[:n]
+    # the continuous rub underneath: a low rough rumble
+    rub = band(rng.standard_normal(n), lo=70, hi=520, order=3) * (0.4 + 0.6 * rough)
+    # and each catch is itself a tiny dry "tk" as the stone's grit lets go: the grain
+    # of the sound, a little brighter than the wood but still well short of a squeak
+    tk = burst(rng, 0.004, 0.0006, lo=600, hi=2000)
+    grit = np.convolve(imp, tk)[:n]
+    y = (catches / (np.abs(catches).max() + 1e-9) + G_GRIT * grit / (np.abs(grit).max() + 1e-9)
+         + 0.3 * rub / (np.abs(rub).max() + 1e-9))
+    y = band(y, lo=80, hi=2300, order=4)   # nothing shrill
     y *= np.clip(t / 0.03, 0, 1) * np.clip((dur - t) / 0.05, 0, 1)
     return y
 
@@ -225,7 +247,11 @@ SOUNDS = {"die_wall": die_wall, "die_floor": die_floor, "die_die": die_die, "dic
 VARIANTS = 6
 
 if __name__ == "__main__":
+    import sys
+    only = sys.argv[1:]       # e.g. stone_slide: write just these
     for name, fn in SOUNDS.items():
+        if only and name not in only:
+            continue
         for v in range(VARIANTS if name != "dice_shake" else 3):
             rng = np.random.default_rng(zlib.crc32(("%s%d" % (name, v)).encode()))
             save("%s_%d" % (name, v), fn(rng))

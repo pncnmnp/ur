@@ -88,7 +88,7 @@ var die_prev_w: Array = []
 var die_cool: Array = [0.0, 0.0, 0.0, 0.0]
 const SFX_DB := {
 	"die_wall": -3.0, "die_floor": -2.0, "die_die": -7.0, "dice_shake": -5.0,
-	"stone_place": -4.0, "stone_stone": -4.0, "stone_lift": -22.0, "stone_slide": -13.0,
+	"stone_place": -4.0, "stone_stone": -4.0, "stone_lift": -22.0, "stone_slide": -8.0,
 }
 
 const DIE_SHADER := """
@@ -1733,20 +1733,28 @@ func hand_slide(h: UrHand, node: Node3D, pts: Array) -> void:
 	var dur := 0.2 + total * randf_range(0.16, 0.22)
 	var y0 := node.rotation.y
 	var twist := randf_range(-0.3, 0.3)
+	# the grind of stone on wood swells as the push gets going and dies as it slows, a
+	# touch higher while it moves fastest; each slide starts somewhere else in the clip
 	var arr: Array = sfx.get("stone_slide", [])
+	var pitch0 := randf_range(0.93, 1.07)
 	if not arr.is_empty():
-		slide_player.stream = arr[randi() % arr.size()]
-		slide_player.volume_db = SFX_DB["stone_slide"]
-		slide_player.pitch_scale = randf_range(0.9, 1.1)
+		var st: AudioStream = arr[randi() % arr.size()]
+		slide_player.stream = st
+		slide_player.volume_db = -50.0
+		slide_player.pitch_scale = pitch0
 		slide_player.position = node.position
-		slide_player.play()
+		slide_player.play(randf_range(0.0, maxf(st.get_length() - dur * pitch0 * 1.05 - 0.1, 0.0)))
 	h.move_id += 1
 	var my := h.move_id
 	var tw := create_tween()
 	tweens.append(tw)
-	tw.tween_method(func(t: float) -> void:
+	tw.tween_method(func(u: float) -> void:
 		if h.move_id != my:
 			return
+		var t := (1.0 - cos(u * PI)) * 0.5     # eased: starts and stops gently
+		var speed := sin(u * PI)               # how fast the stone is going (0..1)
+		slide_player.volume_db = SFX_DB["stone_slide"] + linear_to_db(0.12 + 0.88 * speed)
+		slide_player.pitch_scale = pitch0 * (0.95 + 0.08 * speed)
 		var s := t * total
 		var k := 1
 		while k < lens.size() - 1 and float(lens[k]) < s:
@@ -1757,10 +1765,10 @@ func hand_slide(h: UrHand, node: Node3D, pts: Array) -> void:
 		node.position = g
 		node.rotation.y = y0 + twist * t
 		slide_player.position = g,
-		0.0, 1.0, dur).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+		0.0, 1.0, dur)
 	await tw.finished
 	var fade := create_tween()
-	fade.tween_property(slide_player, "volume_db", -50.0, 0.08)
+	fade.tween_property(slide_player, "volume_db", -50.0, 0.06)
 	fade.tween_callback(slide_player.stop)
 
 
