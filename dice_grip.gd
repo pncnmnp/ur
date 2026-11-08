@@ -56,6 +56,10 @@ var stirred: Array = [false, false, false, false]   # a die in the tray nudged b
 var up_l := Vector3.UP         # world up, hand-local
 var tray := Transform3D()      # the tray's layout -> world, and its inner rectangle (x, z)
 var tray_rect := Rect2()
+var rim_top := 0.42            # world height of the rim boards' tops
+var rim_t := 0.3               # their thickness (world)
+var table_floor := 0.0         # tray floor height (world) before any throw has measured it
+var palm_shell := PackedVector3Array()   # points over the palm's surface (hand-local cm)
 var knock := 0.0               # strongest die-on-die knock this step (cm/s), for the sound
 var acc_t := 0.0
 const SIM_DT := 1.0 / 60.0
@@ -625,6 +629,137 @@ func _keep_in_tray(i: int, T: Transform3D, hb: Basis) -> void:
 		pos[i] = (pos[i] as Vector3) + hb.inverse() * back / CM
 
 
+# ---------------------------------------------------------------- the tray as a solid
+# The hand is as solid as the dice: the leather floor and the four rim boards stop it.
+# Whatever the hand is doing (reaching, pinching, closing round the dice, rattling them),
+# its fingers, palm, knuckles and wrist, and the dice it holds, rest on the leather and
+# ride over the wood instead of sinking into them.
+
+## Signed distance (world) from a world point to the tray's solid parts: the floor slab
+## (below the leather, as far as the rim's outer edge) and the rim boards round it.
+func tray_sd(q: Vector3) -> float:
+	var l := tray.affine_inverse() * q
+	var c := tray_rect.get_center()
+	var px := absf(l.x - c.x)
+	var pz := absf(l.z - c.y)
+	var fy := floor_y if floor_y < INF else table_floor
+	var hx := tray_rect.size.x * 0.5
+	var hz := tray_rect.size.y * 0.5
+	# outer block: the rim's outer edge, from far below the floor to the rim's top
+	var oy0 := fy - 40.0     # (deep: its underside is never the nearest way out)
+	var ob := Vector3(px - hx - rim_t, absf(l.y - (oy0 + rim_top) * 0.5) - (rim_top - oy0) * 0.5, pz - hz - rim_t)
+	var outer := Vector3(maxf(ob.x, 0.0), maxf(ob.y, 0.0), maxf(ob.z, 0.0)).length() + minf(maxf(ob.x, maxf(ob.y, ob.z)), 0.0)
+	# minus the well the dice lie in: the inner rectangle, open upward from the leather
+	var ib := Vector3(px - hx, fy - l.y, pz - hz)
+	var inner := Vector3(maxf(ib.x, 0.0), maxf(ib.y, 0.0), maxf(ib.z, 0.0)).length() + minf(maxf(ib.x, maxf(ib.y, ib.z)), 0.0)
+	return maxf(outer, -inner)
+
+
+## Outward direction of the tray's surface nearest world point q.
+func tray_n(q: Vector3) -> Vector3:
+	var e := 0.004
+	var n := Vector3(tray_sd(q + Vector3(e, 0, 0)) - tray_sd(q - Vector3(e, 0, 0)),
+		tray_sd(q + Vector3(0, e, 0)) - tray_sd(q - Vector3(0, e, 0)),
+		tray_sd(q + Vector3(0, 0, e)) - tray_sd(q - Vector3(0, 0, e)))
+	return n.normalized() if n.length() > 1e-6 else Vector3.UP
+
+
+func _ensure_palm_shell(h: UrHand) -> void:
+	if not palm_shell.is_empty():
+		return
+	for x in range(-9, 10):
+		for y in range(-6, 4):
+			for z in range(-2, 17):
+				var p := Vector3(x, y, z) * 0.6
+				if absf(h.palm_sdf(p)) < 0.3:
+					palm_shell.append(p)
+
+
+## Where hand h, placed at T with finger capsules cs, is in the tray's wood or leather:
+## [[outward normal (world), depth (world)], ...]. With held, the dice it holds count too.
+func solid_contacts(T: Transform3D, h: UrHand, cs: Dictionary, held: bool) -> Array:
+	var out: Array = []
+	# nothing of the hand reaches the tray: done
+	if tray_sd(T * Vector3(0.0, -1.0, 6.0)) > 16.0 * CM:
+		return out
+	_ensure_palm_shell(h)
+	var bi := T.basis.inverse()
+	for d in cs:
+		for cap in cs[d]:
+			for u: float in [0.0, 0.25, 0.5, 0.75, 1.0]:
+				var p: Vector3 = (cap[0] as Vector3).lerp(cap[1], u)
+				var r: float = lerpf(cap[2], cap[3], u)
+				var w := T * p
+				var sd := tray_sd(w)
+				if sd >= r * CM:
+					continue
+				var n := tray_n(w)
+				# the finger is flattened palm to back: thinner that way
+				var yy: float = (bi * n).normalized().dot(cap[4])
+				var pen := r * sqrt(maxf(1.0 - float(cap[5]) * yy * yy, 0.0)) * CM - sd
+				if pen > 0.0:
+					out.append([n, pen])
+	for p in palm_shell:
+		var w := T * p
+		var sd := tray_sd(w)
+		if sd < 0.0:
+			out.append([tray_n(w), -sd])
+	# the bare wrist, up to the sleeve's hem
+	var fa: int = h.bones["forearm"]
+	var ua: int = h.bones["upperarm"]
+	var a := h.skel.get_bone_global_pose(fa).origin
+	var ax := (h.skel.get_bone_global_pose(ua).origin - a).normalized()
+	for z: float in [0.0, 2.5, 5.0]:
+		var w := T * (a + ax * z)
+		var sd := tray_sd(w)
+		if sd < 2.6 * CM:
+			out.append([tray_n(w), 2.6 * CM - sd])
+	if held and hand == h:
+		for j in 4:
+			if mode[j] == TABLE:
+				continue
+			for s in coarse:
+				var w := T * ((pos[j] as Vector3) + (rot[j] as Basis) * s)
+				var sd := tray_sd(w)
+				if sd < 0.0:
+					out.append([tray_n(w), -sd])
+	return out
+
+
+## The smallest move (world) that takes everything in `contacts` out of the tray.
+func solve_push(contacts: Array) -> Vector3:
+	var d := Vector3.ZERO
+	if contacts.is_empty():
+		return d
+	for it in 6:
+		var worst := 0.0
+		for c in contacts:
+			var v: float = float(c[1]) - (c[0] as Vector3).dot(d)
+			if v > 1e-5:
+				d += (c[0] as Vector3) * v
+				worst = maxf(worst, v)
+		if worst < 1e-4:
+			break
+	return d
+
+
+## How far hand h, about to be placed at T in its current pose, must move to stay out of
+## the tray's floor and rim (world). UrHand calls this every time it is placed.
+func hand_push(T: Transform3D, h: UrHand) -> Vector3:
+	var cs := h.capsules()
+	var d := Vector3.ZERO
+	# the surface turns as the hand moves off it (round edges, a corner of floor and
+	# rim): look again from where it was pushed to, until nothing is in the wood
+	for it in 5:
+		var T2 := T
+		T2.origin += d
+		var step := solve_push(solid_contacts(T2, h, cs, true))
+		d += step
+		if step.length() < 0.002 * CM:
+			break
+	return d
+
+
 # ---------------------------------------------------------------- planning
 
 ## Die i in hand-local cm as it would be if the hand had transform T.
@@ -639,25 +774,14 @@ func local_under(T: Transform3D, i: int) -> Array:
 ## `skip` are left out (their touch is solved separately). i_target is the die about to
 ## be taken; dice already in the hand ride along and must clear the floor and the dice
 ## still lying in the tray.
-func clash(T: Transform3D, pose: Dictionary, skip: Array, i_target: int, world_pen: Callable) -> float:
-	for d in UrHand.DIGITS:
-		for k in 3:
-			var i: int = hand.bones["%s_%d" % [d, k]]
-			if pose.has(i):
-				hand.skel.set_bone_pose_rotation(i, hand.rest_rot[i] * Quaternion(Vector3.RIGHT, deg_to_rad(pose[i].x)) * Quaternion(Vector3.UP, deg_to_rad(pose[i].y)))
-	var cs := hand.capsules()
-	hand._apply_pose()
+func clash(T: Transform3D, pose: Dictionary, skip: Array, i_target: int) -> float:
+	var cs := pose_caps(pose)
 	for d in skip:
 		cs.erase(d)
-	var row := Vector3(T.basis.x.y, T.basis.y.y, T.basis.z.y)
 	var bad := 0.0
 	for j in 4:
 		if mode[j] != TABLE:
-			# held: its place in the hand does not change; it must clear floor and tray dice
-			for s in coarse:
-				var p: Vector3 = (pos[j] as Vector3) + (rot[j] as Basis) * s
-				bad += maxf(0.0, floor_y + 0.03 - (T.origin.y + row.dot(p))) / CM
-			continue
+			continue      # held: rides along in the hand (checked against the tray below)
 		var lr := local_under(T, j)
 		var dp: Vector3 = lr[0]
 		var dr: Basis = lr[1]
@@ -674,10 +798,25 @@ func clash(T: Transform3D, pose: Dictionary, skip: Array, i_target: int, world_p
 			for s in coarse:
 				var ev := die_eval(dr.transposed() * ((pos[h] as Vector3) + (rot[h] as Basis) * s - dp))
 				bad += maxf(0.0, -ev.w + 0.15)
-	# fingers and thumb clear of the floor and of anything else in the world (the rim)
-	for d in cs:
-		for cap in cs[d]:
-			for e in [cap[0], ((cap[0] as Vector3) + (cap[1] as Vector3)) * 0.5, cap[1]]:
-				bad += maxf(0.0, floor_y + float(cap[3]) * CM - (T.origin.y + row.dot(e))) / CM
-				bad += world_pen.call(T * (e as Vector3), float(cap[3]) * CM) / CM
+	# the whole hand, and the dice it holds, clear of the tray's floor and rim
+	for c in solid_contacts(T, hand, cs, true):
+		bad += float(c[1]) / CM
 	return bad
+
+
+## The finger and thumb capsules the hand would have in `pose` (its pose is left as it is).
+func pose_caps(pose: Dictionary) -> Dictionary:
+	for d in UrHand.DIGITS:
+		for k in 3:
+			var i: int = hand.bones["%s_%d" % [d, k]]
+			if pose.has(i):
+				hand.skel.set_bone_pose_rotation(i, hand.rest_rot[i] * Quaternion(Vector3.RIGHT, deg_to_rad(pose[i].x)) * Quaternion(Vector3.UP, deg_to_rad(pose[i].y)))
+	var cs := hand.capsules()
+	hand._apply_pose()
+	return cs
+
+
+## How far (world) a hand at T in `pose` must rise to clear the tray's floor (and rim).
+func lift_needed(T: Transform3D, pose: Dictionary) -> float:
+	var d := solve_push(solid_contacts(T, hand, pose_caps(pose), true))
+	return maxf(d.y, 0.0) + Vector2(d.x, d.z).length()

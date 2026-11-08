@@ -57,6 +57,8 @@ var last_wrist := Vector3.ZERO
 var last_vel := Vector3.ZERO
 var swing_live := false
 var aim_yaw := 0.0               # turn of the hand about the vertical, degrees (e.g. to line up with a die)
+var solid := Callable()          # (T, hand) -> world push keeping the hand out of solid things
+var bump := Vector3.ZERO         # how far the last placement was pushed out of them (world)
 var bone_r := {}                 # index -> Vector2(r0, r1): radius of the finger flesh at either end (cm)
 var bone_flat := {}              # index -> how much the finger is flattened (palm to back)
 
@@ -1534,6 +1536,27 @@ func grasp_at(c: Vector3, r: float) -> Dictionary:
 	return d
 
 
+## The pinch for taking something small off a flat surface, with the hand tipped down by
+## `pitch` degrees: thumb and finger pads meet across it level with the surface (not
+## along the tipped hand), so as they open or close they stay at its middle height and
+## never dig their tips down.
+func grasp_level(r: float, pitch: float) -> Dictionary:
+	var key := "grasp_lv_%.2f_%.0f" % [r, pitch]
+	if pose_cache.has(key):
+		return pose_cache[key]
+	var p := deg_to_rad(pitch)
+	var a := Vector3(0.0, sin(p), cos(p))     # level and forward, in the tipped hand
+	var c := GRASP_C
+	var d: Dictionary = pose_dict("pinch").duplicate()
+	var fz := sqrt(maxf(r * r - 0.8, 0.25))
+	_store(d, "index", solve_reach("index", c + Vector3(0.85, 0.0, 0.0) + a * fz, c))
+	_store(d, "middle", solve_reach("middle", c + Vector3(-0.95, 0.0, 0.0) + a * fz, c))
+	_store(d, "thumb", solve_reach("thumb", c + Vector3(0.35, 0.0, 0.0) - a * r, c))
+	pose_cache[key] = d
+	_apply_pose()
+	return d
+
+
 ## Where the thumb meets the index and middle fingers right now (hand-local cm): origin
 ## between the thumb pad and the finger pads, x from thumb toward fingers.
 func pinch_frame() -> Transform3D:
@@ -1684,7 +1707,13 @@ func _place_now() -> void:
 	var b := hand_basis(aim_fwd, aim_pitch, aim_roll)
 	var gl := grip_local() * CM
 	var W := grip_target + shake - b * gl
-	global_transform = Transform3D(b.scaled(Vector3(CM, CM, CM)), _reachable_wrist(W))
+	var T := Transform3D(b.scaled(Vector3(CM, CM, CM)), _reachable_wrist(W))
+	# solid things in the way (the dice tray): the hand comes to rest on them, never in them
+	if solid.is_valid():
+		var push: Vector3 = solid.call(T, self)
+		T.origin += push
+		bump = push
+	global_transform = T
 	_solve_arm()
 	_update_sleeve()
 	placed.emit()

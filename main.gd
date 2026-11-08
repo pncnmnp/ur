@@ -17,6 +17,8 @@ const PIECE_H := 0.26
 const PIECE_R := 0.34
 const LIFT := 0.55          # height of a stone carried by the mouse
 const TRAY := Rect2(-8.6, -2.4, 3.6, 4.8)   # (x, z) rectangle of the dice tray
+const TRAY_RIM_H := 0.42     # height of the tray's rim boards (world)
+const TRAY_RIM_T := 0.3      # and their thickness
 const DIE_R := 0.30         # distance from die centre to a corner (four fit inside a closed fist)
 const DIE_LOOK_R := 0.52    # size the die's markings were drawn for (the shader is scaled to it)
 const DIE_K := 14.0         # sharpness of the rounded tetrahedron
@@ -953,8 +955,8 @@ func build_tray() -> void:
 	# The long side boards overlap the ends and are pinned with dowels.
 	var cx := TRAY.get_center().x
 	var cz := TRAY.get_center().y
-	var t := 0.3
-	var rim_h := 0.42
+	var t := TRAY_RIM_T
+	var rim_h := TRAY_RIM_H
 	var side_len := TRAY.size.y + 2 * t
 	var walls := [
 		[Vector3(t, 4, side_len), Vector3(TRAY.position.x - t / 2, 2, cz)],
@@ -1071,6 +1073,8 @@ func build_dice() -> void:
 	grip = DiceGrip.new(dice_bodies, corners, DIE_R, DIE_K, DIE_H)
 	grip.tray = tray_xf()
 	grip.tray_rect = TRAY
+	grip.rim_top = TRAY_RIM_H
+	grip.rim_t = TRAY_RIM_T
 
 
 # ----------------------------------------------------------------------- UI
@@ -1643,6 +1647,7 @@ func build_hands() -> void:
 	hands[AI] = UrHand.new(UrHand.Style.BLACK, Vector3(-1.0, 4.8, -12.0), Vector3(-1, 0, 0))
 	for h in hands:
 		add_child(h)
+		h.solid = grip.hand_push    # the dice tray is wood and leather: hands rest on it
 	slide_player = AudioStreamPlayer3D.new()
 	slide_player.attenuation_model = AudioStreamPlayer3D.ATTENUATION_DISABLED
 	slide_player.attenuation_filter_db = 0.0
@@ -1831,8 +1836,7 @@ func hand_throw(p: int) -> void:
 	dice_hand = h
 	# 1. pick them up one by one, nearest first
 	h.grip_override = UrHand.GRASP_C
-	var open := h.grasp_pose(UrHand.STONE_OPEN_R)
-	pose_digits(h, open, PINCH_DIGITS)
+	pose_digits(h, h.grasp_level(PICK_OPEN_R, PICK_PITCHES[0]), PINCH_DIGITS)
 	var fist := h.pose_dict("fist")
 	# the ring and little fingers half curl, out of the way of the tray but leaving the
 	# hollow of the hand open for the dice; they close round them as they come
@@ -1845,13 +1849,13 @@ func hand_throw(p: int) -> void:
 	var order := gather_order(h.shoulder)
 	for k in order.size():
 		var i: int = order[k]
-		var plan: Dictionary = await plan_pick(h, i, open)
+		var plan: Dictionary = await plan_pick(h, i)
 		if e != epoch:
 			return
 		# thumb and fingers spread to come down round it (as for a pebble), never
 		# sweeping through a die already in the palm
 		for d in PINCH_DIGITS:
-			grip.drive(d, h.pose_cur.duplicate(), open, 4.0)
+			grip.drive(d, h.pose_cur.duplicate(), plan.open, 4.0)
 		var at: Vector3 = plan.grip
 		if k == 0:
 			await hand_move(h, at + Vector3(0, 1.0, 0), randf_range(0.45, 0.6), 0.5, plan.pitch, null, 0.0, plan.yaw)
@@ -1859,7 +1863,7 @@ func hand_throw(p: int) -> void:
 			await hand_move(h, at + Vector3(0, 0.6, 0), randf_range(0.3, 0.36), 0.2, plan.pitch, null, 0.0, plan.yaw)
 		if e != epoch:
 			return
-		await hand_move(h, at, randf_range(0.18, 0.24), 0.0, plan.pitch + 2.0)
+		await hand_move(h, at, randf_range(0.18, 0.24), 0.0, plan.pitch)
 		if e != epoch:
 			return
 		# thumb, index and middle pads close on it and stop as they meet its faces
@@ -1874,7 +1878,7 @@ func hand_throw(p: int) -> void:
 		for d in PINCH_DIGITS:
 			grip.let_go(d)          # the pinch holds as it is
 		grip.carry(i)
-		play_sfx("stone_lift" if k == 0 else "die_die", at, 0.0 if k == 0 else -12.0)
+		play_sfx("stone_lift", at, randf_range(-2.0, 1.0), 0.08)   # a soft lift off the leather
 		await get_tree().create_timer(0.06).timeout
 		await hand_move(h, at + Vector3(0, 0.4, 0), randf_range(0.18, 0.22), 0.0, plan.pitch - 6.0)
 		if e != epoch:
@@ -1889,7 +1893,9 @@ func hand_throw(p: int) -> void:
 		if e != epoch:
 			return
 		grip.loosen(i, POCKET[k], 500.0)
-		play_sfx("die_die", h.grip_world(), -18.0)
+		if k > 0:
+			# it meets the dice already in his palm: one muffled click (skin damps it)
+			play_sfx("die_die", h.grip_world(), randf_range(-17.0, -13.0), 0.1)
 	# 2. close the hand round all four, palm down, each finger stopping on a die, and
 	# lift the fist off the tray toward his side
 	# (first the thumb and fingers ease off the last one and it settles up into the
@@ -1920,14 +1926,36 @@ func hand_throw(p: int) -> void:
 	if e != epoch:
 		return
 	# 3. rattle them in the closed fist: they knock about inside it
+	# A real shake is a pump of the forearm toward and away from him, the fist tracing a
+	# short tilted arc, the wrist flicking a beat ahead of the arm; it builds over the first
+	# stroke and dies away into the cast. A little roll and sideways drift keep it human.
 	play_sfx("dice_shake", start)
+	var dur := randf_range(0.8, 1.0)
+	var hz := randf_range(4.0, 4.6)
+	var toward := txf.basis * Vector3(0, 0, 1.0 if p == HUMAN else -1.0)   # back toward him
+	var side := Vector3.UP.cross(toward).normalized()
+	var amp := randf_range(0.34, 0.42)          # world (~1.6-2 cm each way)
+	var drift := randf_range(-1.0, 1.0)
+	var sounds := [false]
 	var tw := create_tween()
 	tweens.append(tw)
 	tw.tween_method(func(t: float) -> void:
-		h.shake = Vector3(sin(t * TAU * 3.0) * 0.07, sin(t * TAU * 6.0) * 0.06, cos(t * TAU * 3.0) * 0.16) * sin(t * PI),
-		0.0, 1.0, 0.7)
+		var s := t * dur
+		var env := smoothstep(0.0, 0.16, s) * (1.0 - smoothstep(dur - 0.22, dur, s))
+		var ph := s * TAU * hz
+		var pump := sin(ph) * env
+		h.shake = (toward * pump * amp + Vector3.UP * (sin(ph - 0.5) * 0.55) * amp * env
+			+ side * (sin(ph * 0.5) * 0.12 + drift * 0.05) * amp * env)
+		h.aim_pitch = FIST_PITCH + 9.0 * sin(ph + 0.9) * env
+		h.aim_roll = FIST_ROLL + 4.0 * sin(ph * 0.5 + 0.3) * env
+		if not sounds[0] and s > 0.5:
+			sounds[0] = true
+			play_sfx("dice_shake", start, -3.0),
+		0.0, 1.0, dur)
 	await tw.finished
 	h.shake = Vector3.ZERO
+	h.aim_pitch = FIST_PITCH
+	h.aim_roll = FIST_ROLL
 	if e != epoch:
 		return
 	# 4. cast: the fist swings forward and down and opens, the dice drop out of it
@@ -1948,6 +1976,9 @@ func hand_throw(p: int) -> void:
 
 
 const PINCH_DIGITS := ["index", "middle", "thumb"]
+const PICK_PITCHES := [36.0, 28.0, 44.0, 52.0, 60.0]   # how steeply the hand may come down on a die
+const PICK_OPEN_R := 2.3     # thumb and fingers spread this far (cm, half-width) to come down round one
+const PICK_RISE_MAX := 0.8   # the pinch may sit this much (cm) above the die's middle to keep clear of the leather
 # Where the gathered dice are drawn while he picks up the rest: under the palm, by the
 # heel of the hand and the curled ring and little fingers (hand-local cm)
 # (each is set there by thumb and fingers, pressed up against the palm in the hollow
@@ -1967,13 +1998,15 @@ func pose_digits(h: UrHand, d: Dictionary, ds: Array) -> void:
 	h.set_pose_dict(part)
 
 
-## How to take die i, the way a pebble is taken: the hand turns (no more than ~30
-## degrees from where it naturally points) so thumb and fingers close across the die,
-## tips forward enough that the palm, the spread fingers and the dice already in the
-## hand clear the dice beside it, the floor and the rim, and pinches it just above its
-## middle (the finger pads clear of the floor). The pinch is sized to the die's real
-## width along it.
-func plan_pick(h: UrHand, i: int, open: Dictionary) -> Dictionary:
+## How to take die i, the way a pebble is taken: the hand turns (no more than ~50
+## degrees from where it naturally points, preferring less) so thumb and fingers close
+## across the die, tips forward enough that the palm, the spread fingers and the dice
+## already in the hand clear the dice beside it, the floor and the rim, and pinches it
+## level across its middle. Thumb and finger pads open and close level with the leather,
+## and the pinch rises (a little) until no fingertip, knuckle or held die would touch the
+## floor or the rim, so the hand comes down onto the die rather than into the tray. The
+## pinch is sized to the die's real width along it.
+func plan_pick(h: UrHand, i: int) -> Dictionary:
 	var X: Transform3D = (dice_bodies[i] as Node3D).global_transform
 	var c := X.origin
 	var f0 := hand_fwd(h, c)
@@ -1988,7 +2021,7 @@ func plan_pick(h: UrHand, i: int, open: Dictionary) -> Dictionary:
 		nh = nh.normalized()
 		for fwd in [-nh, nh]:
 			var yaw := rad_to_deg(f0.signed_angle_to(fwd, Vector3.UP))
-			if absf(yaw) <= 32.0:
+			if absf(yaw) <= 50.0:
 				cands.append(yaw)
 	if cands.is_empty():
 		cands.append(0.0)
@@ -1999,52 +2032,60 @@ func plan_pick(h: UrHand, i: int, open: Dictionary) -> Dictionary:
 		for d in ["ring", "pinky"]:
 			for k in 3:
 				rest[h.bones["%s_%d" % [d, k]]] = fist[h.bones["%s_%d" % [d, k]]]
-	for d in PINCH_DIGITS:
-		for k in 3:
-			rest[h.bones["%s_%d" % [d, k]]] = open[h.bones["%s_%d" % [d, k]]]
+	var with_digits := func(pose: Dictionary) -> Dictionary:
+		var out := rest.duplicate()
+		for d in PINCH_DIGITS:
+			for k in 3:
+				var bi: int = h.bones["%s_%d" % [d, k]]
+				out[bi] = pose[bi]
+		return out
 	# pinch height: the pads (about a finger's thickness) just clear of the floor
-	var gy := maxf(c.y, grip.floor_y + 0.95 * UrHand.CM)
+	var gy0 := maxf(c.y, grip.floor_y + 0.95 * UrHand.CM)
 	var opts: Array = []
 	for yaw in cands:
-		for pitch in [32.0, 40.0, 48.0]:
-			opts.append([absf(yaw) / 40.0 + (pitch - 32.0) / 30.0, yaw, pitch])
+		for pitch in PICK_PITCHES:
+			opts.append([absf(yaw) / 40.0 + maxf(absf(yaw) - 32.0, 0.0) / 10.0 + absf(pitch - 36.0) / 30.0, yaw, pitch])
 	opts.sort_custom(func(a: Array, b: Array) -> bool: return a[0] < b[0])
-	var best: Array = opts[0]
+	var best: Array = [opts[0][0], opts[0][1], opts[0][2], gy0]
 	var best_s := INF
+	var tried := 0
 	for o in opts:
-		var T := h.xf_at(Vector3(c.x, gy, c.z), f0, o[2], o[1], UrHand.GRASP_C)
-		var sc: float = o[0] + grip.clash(T, rest, [], i, rim_pen) * 25.0
+		var open: Dictionary = with_digits.call(h.grasp_level(PICK_OPEN_R, o[2]))
+		var shut: Dictionary = with_digits.call(h.grasp_level(0.9, o[2]))
+		var T := h.xf_at(Vector3(c.x, gy0, c.z), f0, o[2], o[1], UrHand.GRASP_C)
+		# rise until neither the open hand nor the closing one would touch the leather
+		var up := 0.0
+		for pose in [open, shut]:
+			var d := grip.solve_push(grip.solid_contacts(T, h, grip.pose_caps(pose), true))
+			up = maxf(up, d.y)
+		up = minf(up, PICK_RISE_MAX * UrHand.CM)
+		T.origin.y += up
+		var sc: float = o[0] + up / UrHand.CM * 0.8 + (grip.clash(T, open, [], i) + grip.clash(T, shut, ["index", "middle", "thumb"], i)) * 25.0
 		if sc < best_s:
 			best_s = sc
-			best = o
-		if sc - o[0] < 0.01:
+			best = [o[0], o[1], o[2], gy0 + up]
+		if sc - o[0] - up / UrHand.CM * 0.8 < 0.01 and up < 0.3 * UrHand.CM:
 			break
+		tried += 1
+		if tried % 4 == 0:
+			await get_tree().process_frame
 	await get_tree().process_frame
 	# the die's width along the pinch, through the pinch point: centre the grip on it
-	var g := Vector3(c.x, gy, c.z)
+	var g := Vector3(c.x, best[3], c.z)
 	var T := h.xf_at(g, f0, best[2], best[1], UrHand.GRASP_C)
 	var lr := grip.local_under(T, i)
 	var dr: Basis = lr[1]
 	var o_l: Vector3 = dr.transposed() * (UrHand.GRASP_C - (lr[0] as Vector3))
-	var zf: Vector3 = dr.transposed() * Vector3(0, 0, 1)
+	var p := deg_to_rad(float(best[2]))
+	var zf: Vector3 = dr.transposed() * Vector3(0, sin(p), cos(p))
 	var rf := grip.ray_from(o_l, zf)
 	var rn := grip.ray_from(o_l, -zf)
 	var r := (rf + rn) * 0.5
-	g += T.basis * Vector3(0, 0, (rf - rn) * 0.5)
+	g += T.basis.orthonormalized() * Vector3(0, sin(p), cos(p)) * ((rf - rn) * 0.5 * UrHand.CM)
 	# close past the die: the pads stop where they meet it
-	var touch := h.grasp_pose(snappedf(maxf(r - 0.35, 0.5), 0.05))
-	return {"grip": g, "yaw": best[1], "pitch": best[2], "touch": touch, "r": snappedf(r, 0.05)}
-
-
-## How far a ball of radius r (world) at world point q is inside the tray's rim boards.
-func rim_pen(q: Vector3, r: float) -> float:
-	var top := 0.42
-	if q.y - r > top:
-		return 0.0
-	var l := tray_xf().affine_inverse() * q
-	var dx := maxf(TRAY.position.x - (l.x - r), (l.x + r) - TRAY.end.x)
-	var dz := maxf(TRAY.position.y - (l.z - r), (l.z + r) - TRAY.end.y)
-	return maxf(0.0, minf(maxf(dx, dz), top - (q.y - r)))
+	var touch := h.grasp_level(snappedf(maxf(r - 0.35, 0.5), 0.05), best[2])
+	var open := h.grasp_level(PICK_OPEN_R, best[2])
+	return {"grip": g, "yaw": best[1], "pitch": best[2], "touch": touch, "open": open, "r": snappedf(r, 0.05)}
 
 
 func dice_centroid() -> Vector3:
@@ -2362,6 +2403,10 @@ func dice_sounds(delta: float) -> void:
 		die_prev_v[i] = v
 		die_prev_w[i] = w
 		die_cool[i] -= delta
+		# while a hand is gathering the dice they are frozen and moved by it: Godot reports
+		# that as velocity, but nothing has struck them (the hand's own clicks cover it)
+		if grip.active() or b.freeze:
+			continue
 		var hit := maxf(dv.length(), spin_hit)
 		if hit < 1.4 or resting or die_cool[i] > 0.0 or not b.visible:
 			continue
