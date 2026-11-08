@@ -2075,12 +2075,150 @@ func spit_stone(wait := -1.0) -> void:
 		pit.global_transform = q, 0.0, 1.0, 0.17)
 	await tw.finished
 	play_sfx("pit_drop", spot)
+	pits.append(pit)
 	await get_tree().create_timer(0.12).timeout
 	h.pose_rate = 9.0
 	h.set_pose("relaxed")
 	await lh_move(h, offstage(h, spot), randf_range(0.6, 0.8), 0.3, 10.0, fwd)
 	h.visible = false
 	h.grip_override = null
+	left_busy = false
+
+
+# ======================================================================
+# Flies
+# ======================================================================
+
+## He keeps half an eye on the flies at his elbow. One on his dates he waves off almost
+## at once; one on the stones he has spat out he lets be a good long while, and then only
+## waves a lazy hand at it. Having just shooed one, he lets the next sit a while before
+## he can be bothered again.
+func watch_flies(delta: float) -> void:
+	fly_clock += delta
+	if not shoo_ok or flies == null or left_busy or eating or fly_clock < shoo_next:
+		shoo_free = fly_clock
+		return
+	for f in flies.sitting():
+		# his patience runs from when the fly sat down, or from when he was ready to be
+		# bothered again, whichever came later: never the very moment he is free
+		var seen := minf(float(f.sat), fly_clock - shoo_free)
+		if seen < float(f.patience):
+			continue
+		shooing.emit("pit" if f.kind == "pit" else "bowl", seen)
+		if f.kind == "pit":
+			shoo_pits(f.pos)
+		else:
+			shoo_bowl(f.pos)
+		return
+
+
+## Move his left hand along a path: at(t) gives [grip, fwd, pitch, roll] for t from 0 to 1.
+func lh_path(h: UrHand, at: Callable, dur: float, ease := Tween.EASE_IN_OUT) -> void:
+	h.move_id += 1
+	var my := h.move_id
+	var tw := create_tween()
+	tw.tween_method(func(t: float) -> void:
+		if h.move_id != my:
+			return
+		var a: Array = at.call(t)
+		h.place(a[0], a[1], a[2], a[3]), 0.0, 1.0, dur).set_trans(Tween.TRANS_SINE).set_ease(ease)
+	await tw.finished
+
+
+## The way from his left shoulder to `at`, level.
+func lh_fwd(at: Vector3) -> Vector3:
+	var fwd := at - lhand.shoulder
+	fwd.y = 0.0
+	return fwd.normalized()
+
+
+## How high his hand must keep over the bowl to pass over the dates heaped in it.
+func heap_top() -> float:
+	var y := bowl.global_position.y + 3.9 * DateBowl.CM
+	for d in bowl.dates:
+		y = maxf(y, (d.node as Node3D).global_position.y + 1.0 * DateBowl.CM)
+	return y
+
+
+## A fly on his dates: a quick flick of the hand across over the bowl, fingers loose and
+## open, the wrist snapping the palm round as it goes, and straight back.
+func shoo_bowl(at: Vector3) -> void:
+	left_busy = true
+	var h := lhand
+	var fwd := lh_fwd(at)
+	var out := Vector3.UP.cross(fwd).normalized()        # his left: out past the bowl
+	var y := maxf(at.y, heap_top())
+	var start := Vector3(at.x, y, at.z) + out * randf_range(1.0, 1.3) + Vector3(0, randf_range(1.35, 1.6), 0)
+	var stop := Vector3(at.x, y, at.z) - out * randf_range(0.9, 1.2) + Vector3(0, randf_range(1.05, 1.25), 0)
+	h.effort = 0.0
+	h.grip_override = null
+	h.aim_yaw = 0.0
+	h.set_pose("relaxed", true)
+	h.place(offstage(h, at), fwd, 10.0)
+	h.visible = true
+	h.pose_rate = 14.0
+	h.set_pose("reach")
+	var from := h.grip_target
+	var p0 := h.aim_pitch
+	await lh_path(h, func(t: float) -> Array:
+		return [from.lerp(start, t) + Vector3(0, sin(t * PI) * 0.4, 0), fwd, lerpf(p0, 6.0, t), lerpf(0.0, 25.0, t)],
+		randf_range(0.36, 0.46), Tween.EASE_OUT)
+	# the flick: palm round to lead, across and a little down over the dates
+	h.effort = 0.25
+	await lh_path(h, func(t: float) -> Array:
+		return [start.lerp(stop, t) - Vector3(0, sin(t * PI) * 0.2, 0), fwd, 6.0 + 8.0 * t, lerpf(25.0, 72.0, t)],
+		randf_range(0.17, 0.23))
+	shoo_next = fly_clock + randf_range(7.0, 16.0)
+	await get_tree().create_timer(randf_range(0.05, 0.12)).timeout
+	h.effort = 0.0
+	h.pose_rate = 9.0
+	h.set_pose("relaxed")
+	var back := offstage(h, at)
+	await lh_path(h, func(t: float) -> Array:
+		return [stop.lerp(back, t) + Vector3(0, sin(t * PI) * 0.3, 0), fwd, lerpf(14.0, 10.0, t), lerpf(72.0, 0.0, t)],
+		randf_range(0.5, 0.65), Tween.EASE_IN)
+	h.visible = false
+	left_busy = false
+
+
+## A fly on the date stones in the sand: in the end he lifts a slow hand over, and gives
+## a lazy wave or two over them, not much caring whether it goes, and takes the hand back.
+func shoo_pits(at: Vector3) -> void:
+	left_busy = true
+	var h := lhand
+	var fwd := lh_fwd(at)
+	var out := Vector3.UP.cross(fwd).normalized()
+	var over := at + out * 0.35 + Vector3(0, randf_range(1.2, 1.5), 0)
+	h.effort = 0.0
+	h.grip_override = null
+	h.aim_yaw = 0.0
+	h.set_pose("relaxed", true)
+	h.place(offstage(h, at), fwd, 10.0)
+	h.visible = true
+	h.pose_rate = 4.0
+	var from := h.grip_target
+	var p0 := h.aim_pitch
+	await lh_path(h, func(t: float) -> Array:
+		return [from.lerp(over, t) + Vector3(0, sin(t * PI) * 0.3, 0), fwd, lerpf(p0, 18.0, t), lerpf(0.0, 15.0, t)],
+		randf_range(1.3, 1.7))
+	# the wave: side to side, sinking a little nearer them, the wrist loose
+	var waves := randf_range(1.0, 2.0)
+	var amp := randf_range(0.55, 0.75)
+	var low := randf_range(0.8, 1.0)
+	await lh_path(h, func(t: float) -> Array:
+		var s := sin(t * waves * TAU)
+		var g := over + out * (s * amp - 0.35 * t) - Vector3(0, (over.y - at.y - low) * sin(t * PI), 0)
+		return [g, fwd, 18.0, 15.0 + 22.0 * absf(s) + 8.0 * sin(t * PI)],
+		randf_range(1.3, 1.7) * waves / 1.5)
+	shoo_next = fly_clock + randf_range(12.0, 25.0)
+	var here := h.grip_target
+	var r0 := h.aim_roll
+	var back := offstage(h, at)
+	await lh_path(h, func(t: float) -> Array:
+		return [here.lerp(back, t) + Vector3(0, sin(t * PI) * 0.3, 0), fwd, lerpf(18.0, 10.0, t), lerpf(r0, 0.0, t)],
+		randf_range(1.0, 1.3))
+	h.pose_rate = 9.0
+	h.visible = false
 	left_busy = false
 
 
@@ -2095,6 +2233,7 @@ func eat_instantly() -> void:
 	var spot := bowl.pit_spot()
 	var b := (Basis(Vector3.UP, randf() * TAU) * Basis(Vector3.BACK, randf_range(-0.6, 0.6))).scaled(Vector3.ONE * DateBowl.CM)
 	pit.global_transform = Transform3D(b, spot + Vector3(0, float(pit.get_meta("half_h")) * DateBowl.CM, 0))
+	pits.append(pit)
 
 
 ## A move slides along the board when it stays on the board and every square it
@@ -2186,6 +2325,13 @@ var snack_rate := 1.0               # (and can make him hungrier)
 var chew := Vector2(16.0, 26.0)     # how long a date takes him, mouth to stone (s): a dried date is
 									# bitten, chewed round the stone, the stone worked clean
 var last_eat := -100.0              # when he last took one (seconds)
+var pits: Array = []                # the date stones he has put down on the sand
+var flies: Flies                    # drawn to his dates and to those stones
+var shoo_ok := true                 # (the tests can stop him shooing them)
+var shoo_next := 0.0                # (fly_clock) he has only just shooed one: not again before this
+var fly_clock := 0.0                # seconds of game time, for the above
+var shoo_free := 0.0                # (fly_clock) since when he has been free to shoo one
+signal shooing(kind: String, sat: float)   # (tests) he is about to shoo a fly: off the "bowl" or the "pit"s
 signal ate
 const AI_LEFT_SHOULDER := Vector3(7.4, 4.8, -12.0)
 const MOUTH := Vector3(3.3, 9.4, -10.4)   # where his mouth is, well out of view
@@ -2214,6 +2360,8 @@ func build_hands() -> void:
 	add_child(lhand)
 	lhand.solid = bowl.hand_push    # the clay is solid to it
 	bowl.attach_hand(lhand)         # and it is solid to the dates
+	flies = Flies.new(bowl, pits, [lhand, hands[AI], hands[HUMAN]])
+	add_child(flies)
 	slide_player = AudioStreamPlayer3D.new()
 	slide_player.attenuation_model = AudioStreamPlayer3D.ATTENUATION_DISABLED
 	slide_player.attenuation_filter_db = 0.0
@@ -3108,6 +3256,7 @@ func _release_held(pt: Vector2) -> void:
 
 func _process(delta: float) -> void:
 	update_clouds(delta)
+	watch_flies(delta)
 	if dragging and human_holding and sel_idx != -1:
 		# the stone in the human's fingers follows the mouse, with a hand's slight lag
 		var node: Node3D = pnodes[HUMAN][sel_idx]
