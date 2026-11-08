@@ -1459,6 +1459,7 @@ func perform_move(idx: int) -> void:
 	dragging = false
 	human_holding = false
 
+	var slide_back := true   # set aside mid-capture: can it be pushed straight back in?
 	var capt_idx := -1
 	if dst >= UrGame.SHARED_FIRST and dst <= UrGame.SHARED_LAST:
 		capt_idx = game.pos[1 - p].find(dst)
@@ -1467,7 +1468,9 @@ func perform_move(idx: int) -> void:
 
 	if held and victim:
 		# set our stone down beside the one we are taking, lift that one off, then push ours across
-		var beside := dst_pos + board_xf().basis * Vector3(0.0, 0.0, 0.85 if p == HUMAN else -0.85)
+		var aside := free_spot_beside(dst_pos, p, [node, victim])
+		var beside: Vector3 = aside.spot
+		slide_back = aside.slide
 		await hand_move(h, beside + Vector3(0, LIFT, 0), 0.2, 0.0, 28.0, node)   # across, clear of it
 		if e != epoch:
 			return
@@ -1503,7 +1506,7 @@ func perform_move(idx: int) -> void:
 	if held and not victim:
 		# already over the square: lower it in
 		await hand_move(h, dst_pos, randf_range(0.18, 0.26), 0.0, 30.0, node)
-	elif (held and victim) or can_slide(p, src, dst):
+	elif (held and victim and slide_back) or (not held and can_slide(p, src, dst)):
 		# pushed along the board, square by square
 		var pts: Array = []
 		if held and victim:
@@ -1544,6 +1547,68 @@ func perform_move(idx: int) -> void:
 
 ## A move slides along the board when it stays on the board and every square it
 ## passes over is empty; otherwise the stone has to be lifted.
+## Is board-local point (x, z) on one of the board's squares (not off the edge, not in the
+## gap where the side rows have no squares)?
+func on_board_local(lx: float, lz: float) -> bool:
+	var cx := roundi(lx + 3.5)
+	var cy := roundi(lz + 1.0)
+	if absf(lx) > 3.85 or absf(lz) > 1.35 or cx < 0 or cx > 7 or cy < 0 or cy > 2:
+		return false
+	return cy == 1 or (cx != 4 and cx != 5)
+
+
+## Shortest distance from point c to segment a-b on the table (xz plane).
+func seg_dist_xz(a: Vector3, b: Vector3, c: Vector3) -> float:
+	var a2 := Vector2(a.x, a.z)
+	var ab := Vector2(b.x, b.z) - a2
+	var c2 := Vector2(c.x, c.z)
+	var t := clampf((c2 - a2).dot(ab) / maxf(ab.length_squared(), 1e-6), 0.0, 1.0)
+	return (a2 + ab * t).distance_to(c2)
+
+
+## A spot near `at` where player p can set a stone down for a moment, clear of every other
+## stone (including the one still sitting on `at`). Returns {"spot": Vector3, "slide": bool}:
+## slide is true when the stone can then be pushed straight back onto `at` without brushing
+## anything; otherwise it has to be lifted back over. Prefers near, slidable, on our own side.
+func free_spot_beside(at: Vector3, p: int, ignore: Array) -> Dictionary:
+	var bx := board_xf()
+	var local := bx.affine_inverse() * at
+	var s := 1.0 if p == HUMAN else -1.0
+	var others: Array = []
+	for q in 2:
+		for n in pnodes[q]:
+			if not ignore.has(n):
+				others.append(n.global_position)
+	var need := 2.0 * PIECE_R + 0.1
+	var best := {"spot": at + bx.basis * Vector3(0, 0, 0.85 * s), "slide": false}
+	var best_cost := INF
+	var best_clear := -INF   # only used if nowhere is clear (cannot happen: 20 squares, 14 stones)
+	for gx in range(-15, 16):
+		for gz in range(-5, 6):
+			var lx := gx * 0.25
+			var lz := gz * 0.25
+			if not on_board_local(lx, lz):
+				continue
+			var spot: Vector3 = bx * Vector3(lx, local.y, lz)
+			var d := Vector2(spot.x - at.x, spot.z - at.z).length()
+			var clear := d
+			var path_clear := INF
+			for o in others:
+				clear = minf(clear, Vector2(o.x - spot.x, o.z - spot.z).length())
+				path_clear = minf(path_clear, seg_dist_xz(spot, at, o))
+			if clear < need:
+				if best_cost == INF and clear > best_clear:
+					best_clear = clear
+					best = {"spot": spot, "slide": false}
+				continue
+			var slide := path_clear >= need
+			var cost := d + (0.0 if slide else 1.0) + (0.15 if (lz - local.z) * s < 0.0 else 0.0)
+			if cost < best_cost:
+				best_cost = cost
+				best = {"spot": spot, "slide": slide}
+	return best
+
+
 func can_slide(p: int, src: int, dst: int) -> bool:
 	if src == 0 or dst >= UrGame.FINISH:
 		return false
