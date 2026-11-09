@@ -53,6 +53,9 @@ var carry_rel: Array = [Transform3D(), Transform3D(), Transform3D(), Transform3D
 var follow: Array = [false, false, false, false]    # LOOSE but held in the pinch: drawn to it as it moves
 var grip_cap: Array = [0.0, 0.0, 0.0, 0.0]         # how hard the fingers can draw it (cm/s^2)
 var stirred: Array = [false, false, false, false]   # a die in the tray nudged by the hand this step
+var settling: Array = [false, false, false, false]  # a die in the tray let fall: real physics until it lies still
+var settle_quiet: Array = [0.0, 0.0, 0.0, 0.0]      # (s) it has lain still
+var settle_age: Array = [0.0, 0.0, 0.0, 0.0]        # (s) since it was let fall
 var up_l := Vector3.UP         # world up, hand-local
 var tray := Transform3D()      # the tray's layout -> world, and its inner rectangle (x, z)
 var tray_rect := Rect2()
@@ -184,6 +187,7 @@ func begin(h: UrHand) -> void:
 		b.freeze = true
 		b.global_transform = xf
 		mode[i] = TABLE
+		settling[i] = false
 		vel[i] = Vector3.ZERO
 		spin[i] = Vector3.ZERO
 		for s in samples:
@@ -198,6 +202,9 @@ func end() -> void:
 	if hand and hand.placed.is_connected(sync):
 		hand.placed.disconnect(sync)
 	sync()
+	for i in 4:
+		if settling[i]:
+			_refreeze(i)   # the throw starts from dice lying exactly where they are
 	ctl.clear()
 	hand = null
 	for i in 4:
@@ -212,6 +219,7 @@ func active() -> bool:
 ## wherever the pinch goes (the fingers carry it).
 func carry(i: int) -> void:
 	if mode[i] == TABLE:
+		_leave_table(i)
 		_from_world(i)
 	mode[i] = CARRIED
 	vel[i] = Vector3.ZERO
@@ -235,6 +243,7 @@ func _follow_pinch() -> void:
 ## Die i is loose in the hand; the fingers holding it draw it toward `to` (hand-local cm).
 func loosen(i: int, to: Vector3, k := 120.0) -> void:
 	if mode[i] == TABLE:
+		_leave_table(i)
 		_from_world(i)
 	mode[i] = LOOSE
 	anchor[i] = to
@@ -248,12 +257,60 @@ func loosen(i: int, to: Vector3, k := 120.0) -> void:
 ## touches instead of passing through them.
 func pinch_loose(i: int) -> void:
 	if mode[i] == TABLE:
+		_leave_table(i)
 		_from_world(i)
 	mode[i] = LOOSE
 	follow[i] = true
 	pull[i] = 700.0
 	grip_cap[i] = 8.0 * GRAV
 	vel[i] = Vector3.ZERO
+
+
+## Die i leaves the tray floor for the hand. Any die lying against it may have been
+## propped up by it: those are handed to the physics engine to fall and settle under
+## gravity (one that was not leaning on it just stays put), then frozen again (_settle).
+## Die i itself is frozen first if it was still settling.
+func _leave_table(i: int) -> void:
+	if settling[i]:
+		_refreeze(i)
+	var at: Vector3 = (bodies[i] as Node3D).global_position
+	for j in 4:
+		if j == i or mode[j] != TABLE or settling[j]:
+			continue
+		var b: RigidBody3D = bodies[j]
+		if b.global_position.distance_to(at) > 2.2 * R * CM:
+			continue    # too far apart to be touching
+		b.freeze = false
+		b.sleeping = false
+		settling[j] = true
+		settle_quiet[j] = 0.0
+		settle_age[j] = 0.0
+
+
+## Dice let fall (_leave_table) are frozen again once they have lain still for a moment
+## (or after a couple of seconds whatever happens), exactly where they came to rest.
+func _settle(dt: float) -> void:
+	for j in 4:
+		if not settling[j]:
+			continue
+		var b: RigidBody3D = bodies[j]
+		settle_age[j] += dt
+		var quiet := b.linear_velocity.length() < 0.08 and b.angular_velocity.length() < 0.25
+		settle_quiet[j] = settle_quiet[j] + dt if quiet else 0.0
+		if settle_quiet[j] > 0.15 or settle_age[j] > 2.0:
+			_refreeze(j)
+
+
+## Freeze die j where it lies (a kinematic freeze would otherwise snap it back to the
+## last place it was put).
+func _refreeze(j: int) -> void:
+	var b: RigidBody3D = bodies[j]
+	var xf := b.global_transform
+	b.linear_velocity = Vector3.ZERO
+	b.angular_velocity = Vector3.ZERO
+	b.freeze = true
+	b.global_transform = xf
+	settling[j] = false
 
 
 func hand_basis() -> Basis:
@@ -542,6 +599,7 @@ func step(dt: float) -> void:
 	var g := hbi * Vector3.DOWN * GRAV
 	var up := hbi * Vector3.UP
 	up_l = up
+	_settle(dt)
 	_refresh_table()
 	_drive_fingers(dt)
 	_follow_pinch()
