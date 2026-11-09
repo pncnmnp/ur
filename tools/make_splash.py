@@ -41,7 +41,7 @@ FONT_INDEX = 1  # the wide cut of Papyrus
 W, H = 3200, 1800
 TITLE = "The Royal Game of Ur"
 CREDIT = "Designed by Parth Parikh"
-CREDIT_SIZE = 62
+CREDIT_SIZE = 64
 FONT_SIZE = 150
 SUN = np.array([-0.55, -0.45, 0.70])  # low sun from the upper left (x right, y down, z up)
 WIND = (0.94, 0.34)  # main.gd SAND_WIND: ripples run across it
@@ -171,6 +171,43 @@ def ink(col, mask, colour, strength, seed):
     return col * (1 - a + a * np.array(colour))
 
 
+def credit_mask(alpha, clear=22, bottom_margin=22):
+    """The credit line's mask, centred on the sand below the papyrus: entirely below the
+    sheet's lowest point (arches, lifted edges and its shadow) under the text, by `clear`
+    px, shrinking the text until it fits above the bottom of the screen."""
+    for size in range(CREDIT_SIZE, 30, -2):
+        f = ImageFont.truetype(FONT, size, index=FONT_INDEX)
+        x0, y0, x1, y1 = f.getbbox(CREDIT, stroke_width=2)
+        left = (W - (x1 - x0)) // 2
+        cols = alpha[:, max(0, left - clear): left + (x1 - x0) + clear + 40]  # +40: shadow falls right
+        rows = np.nonzero((cols > 0.02).any(1))[0]
+        y = int(rows.max()) + clear + 14  # + the shadow's reach below the sheet
+        if y + (y1 - y0) <= H - bottom_margin:
+            m = Image.new("L", (W, H), 0)
+            ImageDraw.Draw(m).text((left - x0, y - y0), CREDIT, font=f, fill=255,
+                                   stroke_width=2, stroke_fill=255)
+            print(f"credit: size {size}, top y {y}")
+            return m
+    raise SystemExit("credit does not fit below the papyrus")
+
+
+def carve(base, mask):
+    """Press `mask` (L, 255 = cut) into the sand: a shaded floor, a dark wall on the side
+    away from the sun, a lit lip on the side facing it."""
+    m = np.asarray(mask.filter(ImageFilter.GaussianBlur(1.0)), np.float32)[..., None] / 255.0
+
+    def shifted(dx, dy, blur):
+        s = mask.transform(mask.size, Image.AFFINE, (1, 0, -dx, 0, 1, -dy))
+        return np.asarray(s.filter(ImageFilter.GaussianBlur(blur)), np.float32)[..., None] / 255.0
+
+    inner_shadow = np.clip(m - shifted(4, 5, 2), 0, 1)
+    lip = np.clip(shifted(3, 4, 2) - m, 0, 1)
+    floor = base * np.array([0.42, 0.31, 0.22])
+    out = base * (1 - m) + floor * m
+    out = out * (1 - 0.5 * inner_shadow)
+    return out + (1 - out) * 0.4 * lip
+
+
 def paint_on(col, logo, lx, top):
     """The painting as if painted onto the papyrus rather than stuck on: its edges fade
     out unevenly, like a brushed edge, with a faint darker rim where the pigment pooled;
@@ -208,7 +245,7 @@ def main() -> None:
     yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
 
     # --- the papyrus: strip B underneath, strip A's bitten edge lying over it
-    sheet_top = 120
+    sheet_top = 80  # high enough to leave a band of sand below for the credit
     a_col, a_m = join(*cut_out(scan, STRIP_A), A_SHEETS)
     b_col, b_m = join(*cut_out(scan, STRIP_B), B_SHEETS)
     ya = sheet_top - 25 * SCALE  # STRIP_A starts a little above the papyrus's top edge
@@ -284,13 +321,9 @@ def main() -> None:
         g(d, tx + text_w + off, gy, 56, 8)
     col = ink(col, gmask, (0.62, 0.25, 0.14), 0.9, 31)
 
-    # --- the credit, smaller, beneath the title (Papyrus has no bold: strokes thickened)
-    cfont = ImageFont.truetype(FONT, CREDIT_SIZE, index=FONT_INDEX)
-    cx0, cy0, cx1, cy1 = cfont.getbbox(CREDIT, stroke_width=2)
-    cmask = Image.new("L", (W, H), 0)
-    ImageDraw.Draw(cmask).text(((W - (cx1 - cx0)) // 2 - cx0, ty + text_h + 44 - cy0), CREDIT,
-                               font=cfont, fill=255, stroke_width=2, stroke_fill=255)
-    col = ink(col, cmask, (0.16, 0.12, 0.10), 0.92, 41)
+    # --- the credit, pressed into the sand below the papyrus, clear of its arches
+    # (Papyrus has no bold: strokes thickened)
+    col = carve(col, credit_mask(alpha))
 
     col = vignette(col)
     out = Image.fromarray((np.clip(col, 0, 1) * 255).astype(np.uint8), "RGB")
