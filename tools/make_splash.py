@@ -48,7 +48,11 @@ STRIP_A = (0, 200, 4000, 990)      # upper strip, worn arches along its bottom e
 STRIP_B = (0, 990, 4000, 1800)     # lower strip
 B_TUCK = 262                       # B slides this far up under A's bitten edge
 SCALE = 1.23                       # scan px -> canvas px
-SCROLL_X = 1420                    # scan x at the canvas's left edge: the scroll's real end shows on the right
+# The strips are longer than the screen, so the scroll is shortened the way scrolls were
+# made: its real left-end sheet (each strip's own left end) pasted onto the main length,
+# whose real right end is kept. Scan x ranges: (left-end sheet), (main length).
+A_SHEETS = ((210, 510), (1840, 3820))
+B_SHEETS = ((1260, 1560), (1840, 3820))
 
 
 # ------------------------------------------------------------------------- noise
@@ -124,12 +128,18 @@ def cut_out(scan, box):
     return a, np.asarray(m, np.float32) / 255.0
 
 
-def place(a, m, y0):
-    """Scale a scan strip to the canvas and position it (scan y0 -> its top)."""
+def join(a, m, sheets):
+    """Paste the strip's left-end sheet onto its main length (scan x ranges)."""
+    (l0, l1), (r0, r1) = sheets
+    return np.concatenate([a[:, l0:l1], a[:, r0:r1]], 1), np.concatenate([m[:, l0:l1], m[:, r0:r1]], 1)
+
+
+def place(a, m, x0, y0):
+    """Scale a scan strip to the canvas and position its top-left at (x0, y0)."""
     w, h = round(a.shape[1] * SCALE), round(a.shape[0] * SCALE)
     img = Image.fromarray((a * 255).astype(np.uint8)).resize((w, h), Image.LANCZOS)
     msk = Image.fromarray((m * 255).astype(np.uint8)).resize((w, h), Image.LANCZOS)
-    ox, oy = round(-SCROLL_X * SCALE), round(y0)
+    ox, oy = round(x0), round(y0)
     col = np.zeros((H, W, 3), np.float32)
     alpha = np.zeros((H, W), np.float32)
     # paste the overlap of the strip and the canvas
@@ -166,12 +176,14 @@ def main() -> None:
 
     # --- the papyrus: strip B underneath, strip A's bitten edge lying over it
     sheet_top = 120
-    a_col, a_m = cut_out(scan, STRIP_A)
-    b_col, b_m = cut_out(scan, STRIP_B)
+    a_col, a_m = join(*cut_out(scan, STRIP_A), A_SHEETS)
+    b_col, b_m = join(*cut_out(scan, STRIP_B), B_SHEETS)
     ya = sheet_top - 25 * SCALE  # STRIP_A starts a little above the papyrus's top edge
     yb = ya + (STRIP_B[1] - STRIP_A[1] - B_TUCK) * SCALE
-    A, Aa = place(a_col, a_m, ya)
-    B, Ba = place(b_col, b_m, yb)
+    # centred: the same papyrus margin of sand either side
+    x0 = (W - a_col.shape[1] * SCALE) / 2
+    A, Aa = place(a_col, a_m, x0, ya)
+    B, Ba = place(b_col, b_m, x0, yb)
     alpha = np.maximum(Aa, Ba)
     # museum flat light -> warm low desert sun: a touch warmer and darker
     pap = (A * Aa[..., None] + B * Ba[..., None] * (1 - Aa[..., None])) / np.maximum(alpha, 1e-4)[..., None]
@@ -179,6 +191,13 @@ def main() -> None:
     # where A lies on B, A casts a thin shadow onto B just past its edge
     a_shadow = np.roll(np.roll(blurred(Aa, 5), 6, 0), 5, 1)
     pap *= (1 - 0.35 * np.clip(a_shadow - Aa, 0, 1) * Ba)[..., None]
+    # the sheet join: the main length overlaps the end sheet, a band of double thickness
+    # a little darker, its raised edge catching the sun
+    seam = x0 + (A_SHEETS[0][1] - A_SHEETS[0][0]) * SCALE
+    dx = xx - seam
+    band = (dx >= 0) & (dx < 34)
+    pap *= (1 - 0.07 * band - 0.12 * np.exp(-((dx - 34) / 2.5) ** 2))[..., None]
+    pap += (1 - pap) * (0.22 * np.exp(-(dx / 2.0) ** 2))[..., None]
 
     # --- curl: papyrus never lies flat; long waves along the fibres, lifted edges
     wave = rng_noise(H, W, 420, 41) * 0.6 + rng_noise(H, W, 160, 42) * 0.4
