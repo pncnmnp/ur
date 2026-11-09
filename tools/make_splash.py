@@ -40,6 +40,8 @@ FONT_INDEX = 1  # the wide cut of Papyrus
 
 W, H = 3200, 1800
 TITLE = "The Royal Game of Ur"
+CREDIT = "Designed by Parth Parikh"
+CREDIT_SIZE = 62
 FONT_SIZE = 150
 SUN = np.array([-0.55, -0.45, 0.70])  # low sun from the upper left (x right, y down, z up)
 WIND = (0.94, 0.34)  # main.gd SAND_WIND: ripples run across it
@@ -281,6 +283,14 @@ def main() -> None:
     for g, off in zip([g_ankh, g_scarab], [150, 310]):
         g(d, tx + text_w + off, gy, 56, 8)
     col = ink(col, gmask, (0.62, 0.25, 0.14), 0.9, 31)
+
+    # --- the credit, smaller, beneath the title (Papyrus has no bold: strokes thickened)
+    cfont = ImageFont.truetype(FONT, CREDIT_SIZE, index=FONT_INDEX)
+    cx0, cy0, cx1, cy1 = cfont.getbbox(CREDIT, stroke_width=2)
+    cmask = Image.new("L", (W, H), 0)
+    ImageDraw.Draw(cmask).text(((W - (cx1 - cx0)) // 2 - cx0, ty + text_h + 44 - cy0), CREDIT,
+                               font=cfont, fill=255, stroke_width=2, stroke_fill=255)
+    col = ink(col, cmask, (0.16, 0.12, 0.10), 0.92, 41)
 
     col = vignette(col)
     out = Image.fromarray((np.clip(col, 0, 1) * 255).astype(np.uint8), "RGB")
