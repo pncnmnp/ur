@@ -16,6 +16,11 @@ config/features=PackedStringArray("4.7")
 config/icon="res://icon.png"
 config/macos_native_icon="res://icons/icon.icns"
 config/windows_native_icon="res://icons/icon.ico"
+boot_splash/bg_color=Color(0.0863, 0.051, 0.0275, 1)
+boot_splash/image="res://icons/splash.png"
+boot_splash/stretch_mode=1
+boot_splash/use_filter=true
+boot_splash/minimum_display_time=2000
 
 [display]
 
