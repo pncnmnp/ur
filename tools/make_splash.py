@@ -171,6 +171,43 @@ def ink(col, mask, colour, strength, seed):
     return col * (1 - a + a * np.array(colour))
 
 
+def grain_noise(sx, sy, seed):
+    """Value noise in 0..1, streaked: features `sx` px across in x and `sy` px in y."""
+    r = np.random.default_rng(seed)
+    gh, gw = H // sy + 3, W // sx + 3
+    g = Image.fromarray((r.random((gh, gw)) * 255).astype(np.uint8))
+    g = g.resize((gw * sx, gh * sy), Image.BICUBIC).crop((sx, sy, sx + W, sy + H))
+    return np.asarray(g, np.float32) / 255.0
+
+
+def pigment(col, mask, colour, strength, seed):
+    """Brush-painted pigment worked into the papyrus, centuries old: the stroke's edge
+    frays along the grain of the fibres; pigment settles in the grooves and skips the
+    raised fibres; a faint stain wicks out along the fibres; and it has worn away in
+    patches. Multiplied in, so the sheet shows through everywhere."""
+    soft = np.asarray(mask.filter(ImageFilter.GaussianBlur(1.6)), np.float32) / 255.0
+    # frayed edge: the cut-off wanders with streaky noise along both fibre directions
+    grain = grain_noise(2, 26, seed) * 0.5 + grain_noise(26, 2, seed + 1) * 0.5
+    lumpy = rng_noise(H, W, 14, seed + 2)
+    thr = 0.5 + (grain - 0.5) * 0.5 + (lumpy - 0.5) * 0.2
+    m = np.clip((soft - thr + 0.02) / 0.24, 0, 1)
+    m = m * m * (3 - 2 * m)
+    # how the sheet takes the pigment: more in its grooves, less on raised fibres
+    lum = col @ np.array([0.3, 0.59, 0.11])
+    detail = lum / np.maximum(blurred(lum, 5), 1e-3)
+    take = np.clip(1.0 - (detail - 1.0) * 3.0, 0.45, 1.25)
+    # loaded brush vs. dry: slow variation in density, and worn, flaked patches
+    load = 0.78 + 0.22 * rng_noise(H, W, 60, seed + 3)
+    wear = np.clip((rng_noise(H, W, 22, seed + 4) - 0.6) * 3.5, 0, 1)
+    flake = np.clip((rng_noise(H, W, 4, seed + 5) - 0.8) * 6, 0, 1)
+    dens = take * load * (1 - 0.55 * wear) * (1 - 0.6 * flake)
+    # a faint stain wicked out along the fibres around the stroke
+    wick = np.asarray(mask.filter(ImageFilter.BoxBlur(6)), np.float32) / 255.0
+    a = np.clip(m * dens + 0.10 * wick * (1 - m), 0, 1) * strength
+    a = a[..., None]
+    return col * (1 - a + a * np.array(colour))
+
+
 def credit_mask(alpha, clear=22, bottom_margin=22):
     """The credit line's mask, centred on the sand below the papyrus: entirely below the
     sheet's lowest point (arches, lifted edges and its shadow) under the text, by `clear`
@@ -316,10 +353,11 @@ def main() -> None:
     d = ImageDraw.Draw(gmask)
     gy = ty + text_h / 2 - 6
     for g, off in zip([g_eye, g_ankh], [150, 310]):
-        g(d, tx - off, gy, 56, 8)
+        g(d, tx - off, gy, 58, 9)
     for g, off in zip([g_ankh, g_scarab], [150, 310]):
-        g(d, tx + text_w + off, gy, 56, 8)
-    col = ink(col, gmask, (0.62, 0.25, 0.14), 0.9, 31)
+        g(d, tx + text_w + off, gy, 58, 9)
+    # red ochre, aged: darker and browner than fresh, painted into the fibres
+    col = pigment(col, gmask, (0.56, 0.24, 0.15), 0.88, 31)
 
     # --- the credit, pressed into the sand below the papyrus, clear of its arches
     # (Papyrus has no bold: strokes thickened)
