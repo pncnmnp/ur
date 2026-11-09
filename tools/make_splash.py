@@ -1,6 +1,13 @@
-"""Boot splash: an old, worn papyrus sheet lying on the game's desert sand, the full
-painting (icons/icon_1024.png, pixel-for-pixel, no resampling) attached to it, and the
-title written beneath in black ink (Papyrus font) between red-ochre glyphs from the board.
+"""Boot splash: a real ancient papyrus lying on the game's desert sand, the full painting
+(icons/icon_1024.png, pixel-for-pixel, no resampling) attached to it, and the title
+written beneath in black ink (Papyrus font) between red-ochre glyphs from the board.
+
+The papyrus is a photograph of a real blank sheet: The Metropolitan Museum of Art,
+26.3.317, "Blank sheet of papyrus", released CC0 (tools/source/). Its two strips are laid
+the way scroll sheets were pasted, the upper strip's worn, arch-bitten edge overlapping the
+lower one, running off both sides of the screen like an unrolled scroll. It is given a
+gentle curl lit by the same low sun as the sand, a shadow that grows where it lifts, and
+wind-blown sand drifted over its windward edge and scattered across it.
 
 The sand is built the way the game's sand shader does it (main.gd SAND_SHADER): the
 sand albedo tiled and mixed with a larger copy of itself, slow light/dark patches, and
@@ -26,16 +33,25 @@ LOGO = ROOT / "icons" / "icon_1024.png"
 OUT = ROOT / "icons" / "splash.png"
 SAND_ALB = ROOT / "assets" / "sand_albedo.png"
 SAND_NRM = ROOT / "assets" / "sand_normal.png"
+PAPYRUS = ROOT / "tools" / "source" / "met_blank_papyrus_26.3.317.jpg"
 FONT = "/System/Library/Fonts/Supplemental/Papyrus.ttc"
 FONT_INDEX = 1  # the wide cut of Papyrus
 
 W, H = 3200, 1800
 TITLE = "The Royal Game of Ur"
-FONT_SIZE = 160
+FONT_SIZE = 150
 SUN = np.array([-0.55, -0.45, 0.70])  # low sun from the upper left (x right, y down, z up)
 WIND = (0.94, 0.34)  # main.gd SAND_WIND: ripples run across it
 
+# In the scan (4000x1973): the two strips, and where they are cut from it.
+STRIP_A = (0, 200, 4000, 990)      # upper strip, worn arches along its bottom edge
+STRIP_B = (0, 990, 4000, 1800)     # lower strip
+B_TUCK = 262                       # B slides this far up under A's bitten edge
+SCALE = 1.23                       # scan px -> canvas px
+SCROLL_X = 1420                    # scan x at the canvas's left edge: the scroll's real end shows on the right
 
+
+# ------------------------------------------------------------------------- noise
 def rng_noise(h, w, scale, seed):
     """Smooth value noise in 0..1 with features about `scale` px across."""
     r = np.random.default_rng(seed)
@@ -43,6 +59,11 @@ def rng_noise(h, w, scale, seed):
     g = Image.fromarray((r.random((gh, gw)) * 255).astype(np.uint8))
     g = g.resize((gw * scale, gh * scale), Image.BICUBIC).crop((scale, scale, scale + w, scale + h))
     return np.asarray(g, np.float32) / 255.0
+
+
+def blurred(a, radius):
+    im = Image.fromarray((np.clip(a, 0, 1) * 255).astype(np.uint8))
+    return np.asarray(im.filter(ImageFilter.GaussianBlur(radius)), np.float32) / 255.0
 
 
 def tiled(img, scale, offset=(0, 0)):
@@ -56,6 +77,7 @@ def tiled(img, scale, offset=(0, 0)):
     return np.asarray(out, np.float32) / 255.0
 
 
+# -------------------------------------------------------------------------- sand
 def sand() -> np.ndarray:
     alb = Image.open(SAND_ALB).convert("RGB")
     nrm = Image.open(SAND_NRM).convert("RGB")
@@ -73,204 +95,148 @@ def sand() -> np.ndarray:
     lit = np.clip((n * sun).sum(-1), 0, 1) / sun[2]
     col *= (0.55 + 0.45 * lit)[..., None] * 1.08
 
-    # long dune swells across the wind, lit on the windward face
+    # long dune swells across the wind
     yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
     along = xx * WIND[0] + yy * WIND[1]
     warp = rng_noise(H, W, 500, 4) * 260
     swell = np.sin((along + warp) / 360.0 * 2 * math.pi)
     col *= (1.0 + 0.07 * swell)[..., None]
-
-    # vignette: the light falls off toward the edges
-    r = np.hypot((xx - W / 2) / (W / 2), (yy - H / 2) / (H / 2))
-    col *= (1.0 - 0.38 * np.clip(r - 0.35, 0, 1) ** 1.6)[..., None]
     return np.clip(col, 0, 1)
 
 
-def aniso(h, w, sx, sy, seed):
-    """Value noise in 0..1, features `sx` px across in x and `sy` px in y."""
-    r = np.random.default_rng(seed)
-    gh, gw = max(2, h // sy + 3), max(2, w // sx + 3)
-    g = Image.fromarray((r.random((gh, gw)) * 255).astype(np.uint8))
-    g = g.resize((gw * sx, gh * sy), Image.BICUBIC).crop((sx, sy, sx + w, sy + h))
-    return np.asarray(g, np.float32) / 255.0
+def vignette(col):
+    yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
+    r = np.hypot((xx - W / 2) / (W / 2), (yy - H / 2) / (H / 2))
+    return col * (1.0 - 0.38 * np.clip(r - 0.35, 0, 1) ** 1.6)[..., None]
 
 
-def blurred(a, radius):
-    im = Image.fromarray((np.clip(a, 0, 1) * 255).astype(np.uint8))
-    return np.asarray(im.filter(ImageFilter.GaussianBlur(radius)), np.float32) / 255.0
+# ----------------------------------------------------------------------- papyrus
+def cut_out(scan, box):
+    """A strip of the scan and its mask: papyrus is darker and more saturated than the
+    museum's cream mount. The mask is pulled in a pixel and softened so no mount fringe."""
+    a = np.asarray(scan.crop(box), np.float32) / 255.0
+    lum = a @ np.array([0.3, 0.59, 0.11])
+    mx, mn = a.max(-1), a.min(-1)
+    sat = (mx - mn) / (mx + 1e-6)
+    m = Image.fromarray(((lum < 0.80) & (sat > 0.2)).astype(np.uint8) * 255)
+    m = m.filter(ImageFilter.MedianFilter(5)).filter(ImageFilter.MinFilter(5))
+    m = m.filter(ImageFilter.GaussianBlur(1.2))
+    return a, np.asarray(m, np.float32) / 255.0
 
 
-def strips(h, w, axis, seed):
-    """Papyrus is two layers of pith strips laid crosswise. Returns, for strips running
-    along `axis` (0 = vertical strips, 1 = horizontal): per-pixel tone, and per-pixel strip
-    index (for ragged strip ends at the sheet's edges)."""
-    r = np.random.default_rng(seed)
-    n = w if axis == 0 else h
-    edges, x = [0], 0
-    while x < n:
-        x += int(r.integers(38, 78))
-        edges.append(min(x, n))
-    idx = np.zeros(n, int)
-    tone = np.zeros(n, np.float32)
-    for k in range(len(edges) - 1):
-        a, b = edges[k], edges[k + 1]
-        idx[a:b] = k
-        # each strip a touch lighter or darker, darker at its overlapping edges
-        u = np.linspace(0, 1, b - a)
-        tone[a:b] = r.normal(0, 0.03) - 0.025 * np.exp(-((u * (1 - u)) / 0.01)) * r.uniform(0.3, 1)
-    # fibres: long, slightly wavering streaks along the strip, some darker, some paler
-    dark = fibre_lines(h, w, axis, n // 5, seed + 1)
-    pale = fibre_lines(h, w, axis, n // 9, seed + 2)
-    if axis == 0:
-        streak = aniso(h, w, 2, 220, seed + 3)
-        t = tone[None, :] - 0.20 * dark + 0.10 * pale + (streak - 0.5) * 0.10
-        return t, idx[None, :].repeat(h, 0), len(edges)
-    streak = aniso(h, w, 220, 2, seed + 3)
-    t = tone[:, None] - 0.20 * dark + 0.10 * pale + (streak - 0.5) * 0.10
-    return t, idx[:, None].repeat(w, 1), len(edges)
+def place(a, m, y0):
+    """Scale a scan strip to the canvas and position it (scan y0 -> its top)."""
+    w, h = round(a.shape[1] * SCALE), round(a.shape[0] * SCALE)
+    img = Image.fromarray((a * 255).astype(np.uint8)).resize((w, h), Image.LANCZOS)
+    msk = Image.fromarray((m * 255).astype(np.uint8)).resize((w, h), Image.LANCZOS)
+    ox, oy = round(-SCROLL_X * SCALE), round(y0)
+    col = np.zeros((H, W, 3), np.float32)
+    alpha = np.zeros((H, W), np.float32)
+    # paste the overlap of the strip and the canvas
+    sx0, sy0 = max(0, -ox), max(0, -oy)
+    dx0, dy0 = max(0, ox), max(0, oy)
+    cw, ch = min(w - sx0, W - dx0), min(h - sy0, H - dy0)
+    col[dy0:dy0 + ch, dx0:dx0 + cw] = np.asarray(img, np.float32)[sy0:sy0 + ch, sx0:sx0 + cw] / 255.0
+    alpha[dy0:dy0 + ch, dx0:dx0 + cw] = np.asarray(msk, np.float32)[sy0:sy0 + ch, sx0:sx0 + cw] / 255.0
+    return col, alpha
 
 
-def fibre_lines(h, w, axis, count, seed):
-    """Thin wavering fibre lines running along `axis` (0 = vertical), 0..1."""
-    r = np.random.default_rng(seed)
-    im = Image.new("L", (w, h), 0)
-    d = ImageDraw.Draw(im)
-    n_across, n_along = (w, h) if axis == 0 else (h, w)
-    for _ in range(count):
-        p = r.uniform(0, n_across)
-        a = r.uniform(-200, n_along)
-        length = r.uniform(250, 1600)
-        pts, t = [], a
-        while t < a + length:
-            p += r.normal(0, 1.2)
-            pts.append((p, t) if axis == 0 else (t, p))
-            t += 40
-        if len(pts) > 1:
-            d.line(pts, fill=int(r.uniform(60, 230)), width=int(r.choice([1, 1, 2, 2, 3])))
-    return np.asarray(im.filter(ImageFilter.GaussianBlur(0.7)), np.float32) / 255.0
-
-
-def papyrus_sheet(sw, sh, seed=7):
-    """An old, worn papyrus sheet: RGB (0..1) and an alpha mask with frayed, torn edges."""
-    r = np.random.default_rng(seed)
-    v_tone, v_idx, nv = strips(sh, sw, 0, seed)
-    h_tone, h_idx, nh = strips(sh, sw, 1, seed + 10)
-    tone = v_tone * 0.55 + h_tone * 0.75  # the top (horizontal) layer shows more
-    col = np.array([0.84, 0.73, 0.52]) * (1 + tone)[..., None]
-
-    # age: blotchy stains, a few water marks with darker tide lines, foxing specks
-    stain = aniso(sh, sw, 260, 260, seed + 3) * 0.6 + aniso(sh, sw, 90, 90, seed + 4) * 0.4
-    stain = np.clip((stain - 0.5) * 2.4, 0, 1)
-    col *= (1 - 0.22 * stain)[..., None] * np.array([1.0, 0.96, 0.9])
-    yy, xx = np.mgrid[0:sh, 0:sw].astype(np.float32)
-    for _ in range(3):
-        cx, cy, rad = r.uniform(0, sw), r.uniform(0, sh), r.uniform(180, 380)
-        d = np.hypot(xx - cx, yy - cy) / rad + (aniso(sh, sw, 80, 80, int(r.integers(1e6))) - 0.5) * 0.3
-        inside = blurred((d < 1).astype(np.float32), 30)
-        col *= (1 - 0.05 * inside - 0.06 * np.exp(-((d - 1) / 0.06) ** 2))[..., None]
-    specks = aniso(sh, sw, 4, 4, seed + 5)
-    col *= (1 - 0.3 * np.clip((specks - 0.965) * 20, 0, 1))[..., None]
-
-    # creases where it was folded: a dark line with a pale lip
-    for x in (sw * 0.5 + r.uniform(-40, 40),):
-        dx = xx - x - (aniso(sh, sw, 400, 300, seed + 6) - 0.5) * 30
-        col *= (1 - 0.13 * np.exp(-(dx / 3) ** 2) + 0.05 * np.exp(-((dx - 6) / 4) ** 2))[..., None]
-    for y in (sh * 0.36 + r.uniform(-30, 30),):
-        dy = yy - y - (aniso(sh, sw, 300, 400, seed + 7) - 0.5) * 30
-        col *= (1 - 0.11 * np.exp(-(dy / 3) ** 2) + 0.04 * np.exp(-((dy - 6) / 4) ** 2))[..., None]
-
-    # frayed outline: each strip ends at its own ragged length, the edge wanders
-    v_off = r.uniform(0, 1, nv)[v_idx] ; h_off = r.uniform(0, 1, nh)[h_idx]
-    wob = aniso(sh, sw, 140, 140, seed + 8) - 0.5
-    fine = aniso(sh, sw, 9, 9, seed + 9) - 0.5
-    inset_tb = 18 + 34 * v_off + 40 * wob + 10 * fine  # top/bottom: ends of the vertical strips
-    inset_lr = 18 + 34 * h_off + 40 * wob + 10 * fine  # left/right: ends of the horizontal strips
-    alpha = ((yy > inset_tb) & (sh - 1 - yy > inset_tb) & (xx > inset_lr) & (sw - 1 - xx > inset_lr))
-    alpha = alpha.astype(np.float32)
-    # bites out of the edge: torn and crumbled away
-    for _ in range(9):
-        side = r.integers(4)
-        cx = r.uniform(0, sw) if side < 2 else (0 if side == 2 else sw)
-        cy = r.uniform(0, sh) if side >= 2 else (0 if side == 0 else sh)
-        rad = r.uniform(40, 130)
-        d = np.hypot(xx - cx, yy - cy) / rad + (aniso(sh, sw, 25, 25, int(r.integers(1e6))) - 0.5) * 0.5
-        alpha *= d > 1
-    # a corner gone
-    cx, cy = sw * r.choice([0, 1]), sh * r.choice([0, 1])
-    alpha *= (np.abs(xx - cx) + np.abs(yy - cy) + (fine * 40)) > r.uniform(150, 230)
-    # a few worm holes
-    for _ in range(40):
-        cx, cy, rad = r.uniform(80, sw - 80), r.uniform(80, sh - 80), r.uniform(6, 16)
-        if 160 < cx < sw - 160 and cy > 160:
-            continue  # only along the sides and top, clear of the painting and title
-        d = np.hypot(xx - cx, yy - cy) / rad + fine * 0.6
-        alpha *= d > 1
-        col *= (1 - 0.35 * np.exp(-((d - 1.2) / 0.5) ** 2))[..., None]
-
-    # the edges are darker, brittle and browned
-    near = 1 - blurred(alpha, 30)
-    col *= (1 - 0.45 * np.clip(near * 1.6, 0, 1))[..., None] * np.array([1.0, 0.94, 0.86])
-    col *= (1 - 0.2 * np.clip((1 - blurred(alpha, 6)) * 3, 0, 1))[..., None]
-    alpha = np.clip(blurred(alpha, 1.0), 0, 1)
-    return np.clip(col, 0, 1), alpha
+def shade_from_height(hgt, strength):
+    """Diffuse light from the sun on a height field, 1.0 where flat."""
+    gy, gx = np.gradient(hgt)
+    n = np.dstack([-gx * strength, -gy * strength, np.ones_like(hgt)])
+    n /= np.linalg.norm(n, axis=-1, keepdims=True)
+    sun = SUN / np.linalg.norm(SUN)
+    return np.clip((n * sun).sum(-1), 0, 1) / sun[2]
 
 
 def ink(col, mask, colour, strength, seed):
-    """Brush ink on the papyrus: soaked unevenly, the fibres showing through."""
+    """Ink soaked into the papyrus: multiplied in, so the fibres show through, unevenly."""
     m = np.asarray(mask.filter(ImageFilter.GaussianBlur(0.9)), np.float32) / 255.0
-    h, w = m.shape
-    patchy = aniso(h, w, 50, 50, seed) * 0.5 + aniso(h, w, 6, 30, seed + 1) * 0.5
-    a = (m * strength * (0.72 + 0.28 * patchy))[..., None]
-    return col * (1 - a) + (col * np.array(colour) * 1.6).clip(0, 1) * a * 0.35 + np.array(colour) * a * 0.65
+    patchy = rng_noise(H, W, 40, seed) * 0.5 + rng_noise(H, W, 9, seed + 1) * 0.5
+    a = (m * strength * (0.75 + 0.25 * patchy))[..., None]
+    return col * (1 - a + a * np.array(colour))
 
 
+# -------------------------------------------------------------------------- main
 def main() -> None:
     logo = Image.open(LOGO).convert("RGB")
+    scan = Image.open(PAPYRUS).convert("RGB")
+    yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
+
+    # --- the papyrus: strip B underneath, strip A's bitten edge lying over it
+    sheet_top = 120
+    a_col, a_m = cut_out(scan, STRIP_A)
+    b_col, b_m = cut_out(scan, STRIP_B)
+    ya = sheet_top - 25 * SCALE  # STRIP_A starts a little above the papyrus's top edge
+    yb = ya + (STRIP_B[1] - STRIP_A[1] - B_TUCK) * SCALE
+    A, Aa = place(a_col, a_m, ya)
+    B, Ba = place(b_col, b_m, yb)
+    alpha = np.maximum(Aa, Ba)
+    # museum flat light -> warm low desert sun: a touch warmer and darker
+    pap = (A * Aa[..., None] + B * Ba[..., None] * (1 - Aa[..., None])) / np.maximum(alpha, 1e-4)[..., None]
+    pap = pap * np.array([1.04, 0.99, 0.92]) * 0.97
+    # where A lies on B, A casts a thin shadow onto B just past its edge
+    a_shadow = np.roll(np.roll(blurred(Aa, 5), 6, 0), 5, 1)
+    pap *= (1 - 0.35 * np.clip(a_shadow - Aa, 0, 1) * Ba)[..., None]
+
+    # --- curl: papyrus never lies flat; long waves along the fibres, lifted edges
+    wave = rng_noise(H, W, 420, 41) * 0.6 + rng_noise(H, W, 160, 42) * 0.4
+    edge_dist = blurred(alpha, 40)  # ~1 deep inside, falls to 0.5 at the edges
+    lift = np.clip(1 - edge_dist, 0, 1) ** 1.5
+    hgt = (wave * 14 + lift * 26 + Aa * 3) * alpha  # canvas px
+    pap *= (0.78 + 0.22 * shade_from_height(blurred(hgt / 40, 6) * 40, 0.9))[..., None]
+
+    # --- onto the sand: a soft shadow, offset and blurred more where the sheet lifts
+    ground = sand()
+    sh_near = np.roll(np.roll(blurred(alpha, 4), 7, 0), 6, 1)
+    sh_far = np.roll(np.roll(blurred(alpha, 24), 34, 0), 28, 1)
+    shadow = np.clip(0.6 * sh_near + 0.55 * sh_far * (0.6 + lift), 0, 1)
+    ground *= (1 - 0.62 * shadow * (1 - alpha))[..., None]
+    # the sheet has a thickness: its edges facing the sun catch it, the far ones fall dark
+    lit_lip = np.clip(alpha - np.roll(np.roll(alpha, 3, 0), 3, 1), 0, 1)
+    dark_lip = np.clip(alpha - np.roll(np.roll(alpha, -3, 0), -3, 1), 0, 1)
+    pap = pap * (1 - 0.3 * dark_lip)[..., None] + (1 - pap) * 0.18 * lit_lip[..., None]
+    col = ground * (1 - alpha[..., None]) + pap * alpha[..., None]
+
+    # --- wind-blown sand: banked against the windward (top) edge and lying in its hollows,
+    # a fine dusting across the sheet, thicker toward the top
+    sand_col = ground / np.maximum(1 - 0.5 * shadow * (1 - alpha), 0.3)[..., None]
+    near_edge = np.clip((1 - blurred(alpha, 14)) * 2.2, 0, 1) * alpha
+    windward = np.clip((1 - yy / (H * 0.55)), 0, 1)  # the top edge faces into the wind
+    drift = near_edge * windward * np.clip((rng_noise(H, W, 70, 51) - 0.35) * 2.5, 0, 1)
+    grains = rng_noise(H, W, 3, 52)
+    dust = np.clip((grains - (0.86 - 0.08 * windward)) * 12, 0, 1) * alpha * 0.55
+    over = np.clip(drift * 0.9 + dust, 0, 1)[..., None]
+    col = col * (1 - over) + sand_col * over
+
+    # --- the title, in ink on the papyrus, glyphs in red ochre either side
     font = ImageFont.truetype(FONT, FONT_SIZE, index=FONT_INDEX)
     tx0, ty0, tx1, ty1 = font.getbbox(TITLE)
     text_w, text_h = tx1 - tx0, ty1 - ty0
-
-    # the sheet: the painting, then the title, with old-book margins
-    m_top, m_side, m_bot, gap = 95, 200, 115, 85
-    gx = [150, 315]  # glyph centres, out from the title's ends
-    sw = text_w + 2 * (gx[-1] + 70 + m_side - 80)
-    sh = m_top + logo.height + gap + text_h + m_bot
-    sx, sy = (W - sw) // 2, (H - sh) // 2
-    lx, top = (W - logo.width) // 2, sy + m_top
-    tx, ty = (W - text_w) // 2, top + logo.height + gap
-
-    canvas = sand()
-    pcol, palpha = papyrus_sheet(sw, sh)
-
-    # the sheet's shadow on the sand, away from the sun, then the sheet
-    shadow = np.zeros((H, W), np.float32)
-    shadow[sy + 22: sy + 22 + sh, sx + 26: sx + 26 + sw] = palpha
-    shadow = blurred(shadow, 18)
-    canvas *= (1 - 0.45 * shadow)[..., None]
-    region = canvas[sy: sy + sh, sx: sx + sw]
-    canvas[sy: sy + sh, sx: sx + sw] = region * (1 - palpha[..., None]) + pcol * palpha[..., None]
-
-    # title in black ink, glyphs in red ochre, the way scribes wrote
+    lx, top = (W - logo.width) // 2, sheet_top + 70
+    tx, ty = (W - text_w) // 2, top + logo.height + 58
     mask = Image.new("L", (W, H), 0)
     ImageDraw.Draw(mask).text((tx - tx0, ty - ty0), TITLE, font=font, fill=255)
     mask = mask.filter(ImageFilter.MaxFilter(3))
-    canvas = ink(canvas, mask, (0.13, 0.08, 0.05), 0.92, 21)
+    col = ink(col, mask, (0.16, 0.12, 0.10), 0.95, 21)
     gmask = Image.new("L", (W, H), 0)
     d = ImageDraw.Draw(gmask)
     gy = ty + text_h / 2 - 6
-    for g, off in zip([g_eye, g_ankh], gx):
-        g(d, tx - off, gy, 60, 8)
-    for g, off in zip([g_ankh, g_scarab], gx):
-        g(d, tx + text_w + off, gy, 60, 8)
-    canvas = ink(canvas, gmask, (0.52, 0.17, 0.08), 0.85, 31)
+    for g, off in zip([g_eye, g_ankh], [150, 310]):
+        g(d, tx - off, gy, 56, 8)
+    for g, off in zip([g_ankh, g_scarab], [150, 310]):
+        g(d, tx + text_w + off, gy, 56, 8)
+    col = ink(col, gmask, (0.62, 0.25, 0.14), 0.9, 31)
 
-    out = Image.fromarray((np.clip(canvas, 0, 1) * 255).astype(np.uint8), "RGB")
+    col = vignette(col)
+    out = Image.fromarray((np.clip(col, 0, 1) * 255).astype(np.uint8), "RGB")
 
-    # the painting attached to the sheet: a faint shadow where it sits proud, pasted 1:1
+    # --- the painting, attached: it sits a hair proud of the sheet, pasted 1:1
     sh_l = Image.new("L", (W, H), 0)
-    ImageDraw.Draw(sh_l).rectangle([lx + 6, top + 9, lx + logo.width + 8, top + logo.height + 12], fill=150)
-    sh_l = sh_l.filter(ImageFilter.GaussianBlur(9))
-    out.paste(Image.new("RGB", (W, H), (60, 38, 18)), (0, 0), sh_l)
+    ImageDraw.Draw(sh_l).rectangle([lx + 4, top + 6, lx + logo.width + 6, top + logo.height + 8], fill=170)
+    sh_l = sh_l.filter(ImageFilter.GaussianBlur(7))
+    out.paste(Image.new("RGB", (W, H), (52, 34, 18)), (0, 0), sh_l)
     out.paste(logo, (lx, top))
 
     out.save(OUT, optimize=True)
