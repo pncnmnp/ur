@@ -690,9 +690,8 @@ func build_environment() -> void:
 	env.sdfgi_cascades = 4
 	env.sdfgi_bounce_feedback = 0.6
 	env.sdfgi_energy = 1.3
-	env.ssil_enabled = true
-	env.ssil_radius = 1.5
-	env.ssil_intensity = 1.2
+	# (no SSIL: SDFGI already gives the bounce light; SSIL on top cost ~5% of the frame
+	# for no visible difference)
 	env.fog_enabled = true # faint heat haze toward the far edge
 	env.fog_light_color = Color(0.9, 0.72, 0.52)
 	env.fog_density = 0.004
@@ -843,7 +842,9 @@ func build_sand() -> void:
 	sm.set_shader_parameter("rect_count", rects.size())
 	sm.set_shader_parameter("wind", SAND_WIND)
 	var mi := MeshInstance3D.new()
-	mi.mesh = sand_mesh(Rect2(-29.5, -24.0, 56.0, 40.0), Rect2(-10.6, -5.2, 18.2, 12.0), 0.045, 0.12)
+	# 9 cm near the table, 24 cm beyond: half as fine as it was (4.5 / 12 cm), which cost
+	# ~20% of the frame for drifts that only differ when zoomed right in
+	mi.mesh = sand_mesh(Rect2(-29.5, -24.0, 56.0, 40.0), Rect2(-10.6, -5.2, 18.2, 12.0), 0.09, 0.24)
 	mi.material_override = sm
 	mi.extra_cull_margin = 1.0
 	add_child(mi)
