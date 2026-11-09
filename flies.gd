@@ -887,6 +887,14 @@ func _show(f: Dictionary, dt: float) -> void:
 
 ## The flies sitting where he might mind: [{pos, kind ("date", "rim", "pit"), sat (s),
 ## patience (s: how long he lets this one sit before he bothers)}].
+## Whether any fly is on the wing (flying about, landing or fleeing), not sitting or away.
+func airborne() -> bool:
+	for f in flies:
+		if f.state == FLY or f.state == LAND or f.state == FLEE:
+			return true
+	return false
+
+
 func sitting() -> Array:
 	var out: Array = []
 	for f in flies:

@@ -67,6 +67,13 @@ var dice_bodies: Array = []
 var die_verts: Array = []
 var dice_result: Array = [0, 0, 0, 0]
 var rolling := false
+# Frame pacing: a board game is mostly still, so there is no need to draw it as fast as
+# the GPU can (it pins the GPU and spins up the fans). Full rate while anything moves or
+# the player is doing something; a lower one once all has been still for a moment.
+const FPS_MOVING := 60
+const FPS_STILL := 30
+const STILL_AFTER := 0.75           # (s) of nothing moving before dropping to FPS_STILL
+var still_for := 0.0
 var throw_time := 0.0
 var still_time := 0.0
 
@@ -3175,6 +3182,28 @@ func dice_sounds(delta: float) -> void:
 # Input and per-frame visuals
 # ======================================================================
 
+## Cap the frame rate: FPS_MOVING while dice, stones, hands or flies are moving or the
+## player is acting, FPS_STILL once nothing has moved for STILL_AFTER seconds. Off when
+## time is sped up or there is no window (the tests), which want every frame they can get.
+func pace_frames(delta: float) -> void:
+	if Engine.time_scale != 1.0 or DisplayServer.get_name() == "headless":
+		Engine.max_fps = 0
+		return
+	var moving := phase == Phase.BUSY or dragging or rolling or left_busy \
+			or (flies != null and flies.airborne())
+	still_for = 0.0 if moving else still_for + delta
+	Engine.max_fps = FPS_MOVING if still_for < STILL_AFTER else FPS_STILL
+
+
+## Any input means the player is doing something: back to full rate at once. (Seen here,
+## before the UI or the game handle it; nothing is consumed.)
+func _input(event: InputEvent) -> void:
+	if event is InputEventMouseMotion or event is InputEventMouseButton or event is InputEventKey:
+		still_for = 0.0
+		if Engine.max_fps == FPS_STILL:
+			Engine.max_fps = FPS_MOVING
+
+
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventMouseMotion:
 		mouse_pos = event.position
@@ -3264,6 +3293,7 @@ func _release_held(pt: Vector2) -> void:
 
 
 func _process(delta: float) -> void:
+	pace_frames(delta)
 	update_clouds(delta)
 	watch_flies(delta)
 	if dragging and human_holding and sel_idx != -1:
