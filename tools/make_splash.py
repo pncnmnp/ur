@@ -42,6 +42,7 @@ W, H = 3200, 1800
 TITLE = "The Royal Game of Ur"
 CREDIT = "Designed by Parth Parikh"
 CREDIT_SIZE = 64
+RIGHT_MARGIN = 110  # the credit sits at the bottom right, this far from the edge
 FONT_SIZE = 150
 SUN = np.array([-0.55, -0.45, 0.70])  # low sun from the upper left (x right, y down, z up)
 WIND = (0.94, 0.34)  # main.gd SAND_WIND: ripples run across it
@@ -209,13 +210,13 @@ def pigment(col, mask, colour, strength, seed):
 
 
 def credit_mask(alpha, clear=22, bottom_margin=22):
-    """The credit line's mask, centred on the sand below the papyrus: entirely below the
+    """The credit line's mask, at the bottom right on the sand below the papyrus: entirely below the
     sheet's lowest point (arches, lifted edges and its shadow) under the text, by `clear`
     px, shrinking the text until it fits above the bottom of the screen."""
     for size in range(CREDIT_SIZE, 30, -2):
         f = ImageFont.truetype(FONT, size, index=FONT_INDEX)
         x0, y0, x1, y1 = f.getbbox(CREDIT, stroke_width=2)
-        left = (W - (x1 - x0)) // 2
+        left = W - RIGHT_MARGIN - (x1 - x0)  # bottom right
         cols = alpha[:, max(0, left - clear): left + (x1 - x0) + clear + 40]  # +40: shadow falls right
         rows = np.nonzero((cols > 0.02).any(1))[0]
         y = int(rows.max()) + clear + 14  # + the shadow's reach below the sheet
