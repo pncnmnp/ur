@@ -1,5 +1,6 @@
 """Boot splash: a real ancient papyrus lying on the game's desert sand, the full painting
-(icons/icon_1024.png, pixel-for-pixel, no resampling) attached to it, and the title
+(icons/icon_1024.png, at its native size, no resampling) painted onto it, its edges
+fading into the sheet and the fibres showing through, and the title
 written beneath in black ink (Papyrus font) between red-ochre glyphs from the board.
 
 The papyrus is a photograph of a real blank sheet: The Metropolitan Museum of Art,
@@ -168,6 +169,36 @@ def ink(col, mask, colour, strength, seed):
     return col * (1 - a + a * np.array(colour))
 
 
+def paint_on(col, logo, lx, top):
+    """The painting as if painted onto the papyrus rather than stuck on: its edges fade
+    out unevenly, like a brushed edge, with a faint darker rim where the pigment pooled;
+    the papyrus fibres show through it (lightly in the middle, more toward the edges);
+    the sheet's curl and shading carry across it; and it has aged a touch into the sheet."""
+    S = logo.width
+    R = col[top:top + S, lx:lx + S]
+    P = np.asarray(logo, np.float32) / 255.0
+    lum = R @ np.array([0.3, 0.59, 0.11])
+    fibre = np.clip(lum / np.maximum(blurred(lum, 10), 1e-3), 0.7, 1.3)
+    light = blurred(lum, 60)
+    light = np.clip(light / light.mean(), 0.85, 1.15)
+
+    yy, xx = np.mgrid[0:S, 0:S].astype(np.float32)
+    u = np.minimum(np.minimum(xx, S - 1 - xx), np.minimum(yy, S - 1 - yy))
+    n = rng_noise(S, S, 48, 61) * 0.75 + rng_noise(S, S, 16, 62) * 0.25
+    m = np.clip((u + (n - 0.5) * 46 - 4) / 70, 0, 1)
+    m = m * m * (3 - 2 * m)
+
+    P = P * 0.94 + R * 0.06                                      # aged into the sheet
+    P = P * (fibre ** (0.6 + 0.9 * (1 - m)))[..., None]          # fibres through the paint
+    P = P * (light ** 0.8)[..., None]                            # the sheet's own light
+    out = R * (1 - m[..., None]) + P * m[..., None]
+    out *= (1 - 0.06 * (4 * m * (1 - m)))[..., None]             # pigment pooled at the edge
+    col[top:top + S, lx:lx + S] = out
+    painted = np.zeros((H, W), np.float32)
+    painted[top:top + S, lx:lx + S] = m
+    return col, painted
+
+
 # -------------------------------------------------------------------------- main
 def main() -> None:
     logo = Image.open(LOGO).convert("RGB")
@@ -218,6 +249,10 @@ def main() -> None:
     pap = pap * (1 - 0.3 * dark_lip)[..., None] + (1 - pap) * 0.18 * lit_lip[..., None]
     col = ground * (1 - alpha[..., None]) + pap * alpha[..., None]
 
+    # --- the painting, painted onto the sheet
+    lx, top = (W - logo.width) // 2, sheet_top + 70
+    col, painted = paint_on(col, logo, lx, top)
+
     # --- wind-blown sand: banked against the windward (top) edge and lying in its hollows,
     # a fine dusting across the sheet, thicker toward the top
     sand_col = ground / np.maximum(1 - 0.5 * shadow * (1 - alpha), 0.3)[..., None]
@@ -226,14 +261,13 @@ def main() -> None:
     drift = near_edge * windward * np.clip((rng_noise(H, W, 70, 51) - 0.35) * 2.5, 0, 1)
     grains = rng_noise(H, W, 3, 52)
     dust = np.clip((grains - (0.86 - 0.08 * windward)) * 12, 0, 1) * alpha * 0.55
-    over = np.clip(drift * 0.9 + dust, 0, 1)[..., None]
+    over = np.clip(drift * 0.9 + dust * (1 - 0.85 * painted), 0, 1)[..., None]
     col = col * (1 - over) + sand_col * over
 
     # --- the title, in ink on the papyrus, glyphs in red ochre either side
     font = ImageFont.truetype(FONT, FONT_SIZE, index=FONT_INDEX)
     tx0, ty0, tx1, ty1 = font.getbbox(TITLE)
     text_w, text_h = tx1 - tx0, ty1 - ty0
-    lx, top = (W - logo.width) // 2, sheet_top + 70
     tx, ty = (W - text_w) // 2, top + logo.height + 58
     mask = Image.new("L", (W, H), 0)
     ImageDraw.Draw(mask).text((tx - tx0, ty - ty0), TITLE, font=font, fill=255)
@@ -250,13 +284,6 @@ def main() -> None:
 
     col = vignette(col)
     out = Image.fromarray((np.clip(col, 0, 1) * 255).astype(np.uint8), "RGB")
-
-    # --- the painting, attached: it sits a hair proud of the sheet, pasted 1:1
-    sh_l = Image.new("L", (W, H), 0)
-    ImageDraw.Draw(sh_l).rectangle([lx + 4, top + 6, lx + logo.width + 6, top + logo.height + 8], fill=170)
-    sh_l = sh_l.filter(ImageFilter.GaussianBlur(7))
-    out.paste(Image.new("RGB", (W, H), (52, 34, 18)), (0, 0), sh_l)
-    out.paste(logo, (lx, top))
 
     out.save(OUT, optimize=True)
     print(f"wrote {OUT} ({W}x{H})")
