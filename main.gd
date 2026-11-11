@@ -86,6 +86,8 @@ var save_button: Button
 var load_button: Button
 var turn_state: UrGame              # the position as the current turn began (or the next one will): what a save keeps
 const SAVE_PATH := "user://ur_save.json"
+const SETTINGS_PATH := "user://ur_settings.cfg"
+var ai_level := 1                   # Al-Khasm's strength: index into UrAI.LEVELS
 # the clay tablet the game's messages are scratched into
 var tablet_mat: ShaderMaterial
 var tablet_label: Label
@@ -1478,8 +1480,38 @@ func build_ui() -> void:
 	load_button = corner_link(root, "load game", 2, load_game)
 	load_button.disabled = not FileAccess.file_exists(SAVE_PATH)
 
+	# below them: Al-Khasm's strength, as one, two or three wedges
+	var cfg := ConfigFile.new()
+	if cfg.load(SETTINGS_PATH) == OK:
+		ai_level = clampi(int(cfg.get_value("ai", "level", ai_level)), 0, UrAI.LEVELS.size() - 1)
+	var wp := WedgePicker.new()
+	wp.names = UrAI.LEVELS
+	wp.level = ai_level
+	wp.word = link_button("")
+	wp.size = Vector2(190, 40)
+	wp.position = Vector2(1600 - 210, 18 + 3 * 38)
+	wp.picked.connect(set_ai_level)
+	root.add_child(wp)
+
+
+func set_ai_level(level: int) -> void:
+	ai_level = level
+	var cfg := ConfigFile.new()
+	cfg.set_value("ai", "level", level)
+	cfg.save(SETTINGS_PATH)
+
 
 func corner_link(root: Control, text: String, row: int, on_press: Callable) -> Button:
+	var b := link_button(text)
+	b.size = Vector2(190, 40)
+	b.position = Vector2(1600 - 210, 18 + row * 38)
+	b.pressed.connect(on_press)
+	root.add_child(b)
+	return b
+
+
+## A faint, flat text button in the corner links' style.
+func link_button(text: String) -> Button:
 	var cream := Color(0.98, 0.9, 0.72)
 	var b := Button.new()
 	b.text = text
@@ -1496,10 +1528,6 @@ func corner_link(root: Control, text: String, row: int, on_press: Callable) -> B
 	b.add_theme_color_override("font_disabled_color", Color(cream, 0.18))
 	b.add_theme_color_override("font_shadow_color", Color(0.1, 0.05, 0.02, 0.6))
 	b.add_theme_constant_override("shadow_offset_y", 2)
-	b.size = Vector2(190, 40)
-	b.position = Vector2(1600 - 210, 18 + row * 38)
-	b.pressed.connect(on_press)
-	root.add_child(b)
 	return b
 
 
@@ -1701,7 +1729,7 @@ func do_roll() -> void:
 		await get_tree().create_timer(0.8).timeout
 		if e != epoch:
 			return
-		var src := UrAI.choose_move(game, roll)
+		var src := UrAI.choose_for_level(game, roll, ai_level)
 		perform_move(game.pos[AI].find(src))
 
 

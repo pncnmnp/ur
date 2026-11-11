@@ -5,6 +5,26 @@ extends RefCounted
 const PROBS := [1.0 / 16, 4.0 / 16, 6.0 / 16, 4.0 / 16, 1.0 / 16]
 const WIN := 10000.0
 
+## Al-Khasm's strengths, weakest first.
+const LEVELS := ["novice", "scribe", "master"]
+
+
+## A move for the given strength (index into LEVELS).
+## novice: often careless, otherwise takes the best-looking move right now.
+## scribe: also weighs every throw the opponent might answer with.
+## master: looks three throws ahead.
+static func choose_for_level(g: UrGame, roll: int, level: int) -> int:
+	match level:
+		0:
+			var moves := g.legal_moves(g.current, roll)
+			if randf() < 0.4 and not moves.is_empty():
+				return moves[randi() % moves.size()]
+			return choose_move(g, roll, 0)
+		1:
+			return choose_move(g, roll, 1)
+		_:
+			return choose_move(g, roll, 3)
+
 
 static func choose_move(g: UrGame, roll: int, depth: int = 3) -> int:
 	var me := g.current
