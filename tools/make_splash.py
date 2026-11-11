@@ -40,7 +40,7 @@ FONT_INDEX = 1  # the wide cut of Papyrus
 
 W, H = 3200, 1800
 TITLE = "The Royal Game of Ur"
-CREDIT = "Designed by Parth Parikh"
+CREDIT = "Designed by Parth Parikh. Coded by Claude."
 CREDIT_SIZE = 64
 RIGHT_MARGIN = 110  # the credit sits at the bottom right, this far from the edge
 FONT_SIZE = 150
