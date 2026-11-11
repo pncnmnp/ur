@@ -1580,6 +1580,7 @@ func set_up(g: UrGame) -> void:
 	rolling = false
 	human_holding = false
 	release_pending = null
+	carried.clear()
 	for h in hands:
 		h.move_id += 1
 		h.shake = Vector3.ZERO
@@ -1903,11 +1904,15 @@ func date_across(h: UrHand, d: Node3D) -> Vector3:
 ## the date slantwise (wider between thumb and fingers). Spread over a few frames.
 func plan_date(h: UrHand) -> Dictionary:
 	var cands := bowl.candidates(bowl.global_position - h.shoulder, 7)
+	if want_date != null and is_instance_valid(want_date):
+		cands = [want_date]
 	var n := 0
 	h.grip_override = UrHand.GRASP_C
 	# (tried out unseen, and without being pushed out of the clay: that is what is measured)
 	var solid := h.solid
 	h.solid = Callable()
+	var room := h.room
+	h.room = Callable()
 	# first, quickly, every way: the hand closed on the date, as it is, fingers unbent
 	var tries: Array = []
 	for d in cands:
@@ -1973,6 +1978,7 @@ func plan_date(h: UrHand) -> Dictionary:
 		await get_tree().process_frame
 	h.set_pose("relaxed", true)
 	h.solid = solid
+	h.room = room
 	return best
 
 
@@ -2344,6 +2350,7 @@ var chew := Vector2(16.0, 26.0)     # how long a date takes him, mouth to stone 
 var last_eat := -100.0              # when he last took one (seconds)
 var pits: Array = []                # the date stones he has put down on the sand
 var flies: Flies                    # drawn to his dates and to those stones
+var want_date: Node3D = null        # (the tests can say which date he takes next)
 var shoo_ok := true                 # (the tests can stop him shooing them)
 var shoo_next := 0.0                # (fly_clock) he has only just shooed one: not again before this
 var fly_clock := 0.0                # seconds of game time, for the above
@@ -2355,6 +2362,8 @@ const MOUTH := Vector3(3.3, 9.4, -10.4)   # where his mouth is, well out of view
 var human_holding := false          # the human's fingers hold the selected stone (dragging)
 var release_pending: Variant = null  # mouse released before the hand had reached the stone
 var drag_target := Vector3.ZERO
+var drag_at := Vector3.ZERO           # where the hand carrying the dragged stone has got to on its way there
+var carried := {}                   # hand -> the stone in its fingers (it goes where the hand goes)
 var slide_player: AudioStreamPlayer3D
 var last_throw: Array = []
 var dice_hand: UrHand = null        # the dice are in this hand (they ride along with it)
@@ -2367,15 +2376,21 @@ func build_hands() -> void:
 	# (the human's arm comes in from low on the right, so it does not hide what his hand is doing)
 	hands[HUMAN] = UrHand.new(UrHand.Style.WHITE, Vector3(3.0, 3.4, 10.0), Vector3(1, 0, 0))
 	hands[HUMAN].lean = 0.15
+	# (his shoulder is just out of view below: his arm goes out of it drawn back, not folded up)
+	hands[HUMAN].draw_back = 5.0
+	hands[HUMAN].table_dir = hand_fwd(hands[HUMAN], hands[HUMAN].shoulder)
 	hands[AI] = UrHand.new(UrHand.Style.BLACK, Vector3(-1.0, 4.8, -12.0), Vector3(-1, 0, 0))
 	for h in hands:
 		add_child(h)
 		h.solid = grip.hand_push    # the dice tray is wood and leather: hands rest on it
+		h.room = hand_room          # in free air they are never quite still
+		h.placed.connect(_carry_along.bind(h))
 	# and his left, which only ever goes to the bowl of dates at his left side
 	lhand = UrHand.new(UrHand.Style.BLACK, AI_LEFT_SHOULDER, Vector3(1, 0, 0), true)
 	lhand.lean = 0.3
 	add_child(lhand)
 	lhand.solid = bowl.hand_push    # the clay is solid to it
+	lhand.room = hand_room
 	bowl.attach_hand(lhand)         # and it is solid to the dates
 	flies = Flies.new(bowl, pits, [lhand, hands[AI], hands[HUMAN]])
 	add_child(flies)
@@ -2421,12 +2436,30 @@ func hand_enter(h: UrHand, toward: Vector3) -> void:
 	h.visible = true
 
 
-## Move the hand's grip point to `to` over dur seconds (eased), arcing up by `arc`.
+## How far along a reach the hand is, `u` of the way through its time: it is fastest
+## about two fifths of the way in, and takes longer slowing down as it homes in on the
+## place than it took getting going. It starts and ends at rest and without a jolt (no
+## sudden pull at either end: a hand has weight).
+func reach_ease(u: float) -> float:
+	var w := u + 0.3 * u * (1.0 - u)
+	return w * w * w * (w * (w * 6.0 - 15.0) + 10.0)
+
+
+const REACH_BOW := 0.06       # how far a reach swings out sideways, as a part of its length
+const REACH_BOW_MAX := 0.35   # and at most (world, ~1.7 cm)
+const BOW_Y := Vector2(1.1, 1.5)   # (world height of the grip) no swing below the first, all of it above the second
+const WRIST_LAG := 0.12       # the wrist starts turning this far into a move, and is done this long before its end
+
+## Move the hand's grip point to `to` over dur seconds, arcing up by `arc`.
 ## A carried stone follows the grip, turning by `twist` radians on the way.
 ## A newer move on the same hand takes over from this one.
 ## The hand also turns to `yaw` and rolls to `roll` (degrees) on the way, if given.
+## A reach (the usual): quick away and slow to arrive (reach_ease); high over the table
+## it swings out a little from the shoulder on the way, leaving and arriving along the
+## straight line; and the wrist does its turning in the middle, after
+## the hand has come away and before it comes in. Not a reach: a plain even swing.
 func hand_move(h: UrHand, to: Vector3, dur: float, arc := 0.0, pitch := NAN, carry: Node3D = null, twist := 0.0,
-		yaw := NAN, roll := NAN) -> void:
+		yaw := NAN, roll := NAN, reach := true) -> void:
 	h.move_id += 1
 	var my := h.move_id
 	var from := h.grip_target
@@ -2437,19 +2470,133 @@ func hand_move(h: UrHand, to: Vector3, dur: float, arc := 0.0, pitch := NAN, car
 	var rl0 := h.aim_roll
 	var rl1 := rl0 if is_nan(roll) else roll
 	var y0 := carry.rotation.y if carry else 0.0
+	if carry:
+		carried[h] = carry
+	# the arm swings from the shoulder, so the hand's way bows outward from it (not at all
+	# when it goes straight out or back). Only up in the air, where the fingertips are above
+	# everything on the table (BOW_Y): a move that keeps low goes straight, as a stone
+	# carried low over the board does
+	var bow := Vector3.ZERO
+	var d := to - from
+	d.y = 0.0
+	var out := (from + to) * 0.5 - h.shoulder
+	out.y = 0.0
+	if reach and d.length() > 0.5 and out.length() > 0.5:
+		var dn := d.normalized()
+		var on := out.normalized()
+		bow = (on - dn * on.dot(dn)) * minf(d.length() * REACH_BOW, REACH_BOW_MAX)
 	var tw := create_tween()
 	tweens.append(tw)
-	tw.tween_method(func(t: float) -> void:
+	tw.tween_method(func(u: float) -> void:
 		if h.move_id != my:
 			return
-		var g := from.lerp(to, t) + Vector3(0, sin(t * PI) * arc, 0)
-		h.aim_yaw = lerpf(yw0, yw1, t)
-		h.place(g, hand_fwd(h, g), lerpf(p0, p1, t), lerpf(rl0, rl1, t))
+		var t := reach_ease(u) if reach else (1.0 - cos(u * PI)) * 0.5
+		var r := reach_ease(clampf((u - WRIST_LAG) / (1.0 - 2.0 * WRIST_LAG), 0.0, 1.0)) if reach else t
+		var s := sin(t * PI)
+		var g := from.lerp(to, t) + Vector3(0, s * arc, 0)
+		g += bow * (s * s * smoothstep(BOW_Y.x, BOW_Y.y, g.y))
+		h.aim_yaw = lerpf(yw0, yw1, r)
 		if carry:
-			carry.position = g
-			carry.rotation.y = y0 + twist * t,
-		0.0, 1.0, dur).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+			carry.rotation.y = y0 + twist * t
+		h.place(g, hand_fwd(h, g), lerpf(p0, p1, r), lerpf(rl0, rl1, r)),    # (what it carries goes with it)
+		0.0, 1.0, dur)
 	await tw.finished
+
+
+## The stone in a hand's fingers goes where the hand goes, its own small movements too.
+func _carry_along(h: UrHand) -> void:
+	var n: Variant = carried.get(h)
+	if n != null and is_instance_valid(n):
+		(n as Node3D).position = h.grip_target + h.live
+
+
+## The flat-topped things lying on the sand: [world -> its own layout, half size (x, z), top].
+var room_rects: Array = []
+func _room_rects() -> Array:
+	if room_rects.is_empty():
+		var tc := tray_xf() * Vector3(TRAY.get_center().x, 0, TRAY.get_center().y)
+		for r in [[board_xf(), Vector2(4.25, 1.75), BY],
+				[strip_xf(HUMAN), Vector2(3.7, 0.45), BY], [strip_xf(AI), Vector2(3.7, 0.45), BY],
+				[plate_xf(HUMAN), HOME_SIZE / 2.0, BY], [plate_xf(AI), HOME_SIZE / 2.0, BY],
+				[place_xf(tc.x, tc.z, TRAY_NUDGE.z), TRAY.size / 2.0 + Vector2.ONE * TRAY_RIM_T, TRAY_RIM_H + 0.02],
+				[place_xf(TABLET_POS.x, TABLET_POS.z, 0.0), Vector2(TABLET_SIZE.x, TABLET_SIZE.z) / 2.0 + Vector2.ONE * 0.15, TABLET_POS.y + 0.1]]:
+			room_rects.append([(r[0] as Transform3D).affine_inverse(), r[1], r[2]])
+	return room_rects
+
+
+## How much room (world) a hand at T has to move a little by itself, level or upward (it
+## never moves downward of itself), without it or what it holds coming against anything:
+## how far the nearest part of it is, sideways or above, from any solid thing (stones, the
+## dice and their tray, the bowl and its dates, the date stones, the tablet), and no more
+## than what it holds (or is about to take) is lifted clear of what is under it, so
+## nothing is slid or lifted that rests on the table. It changes smoothly as the hand
+## moves. 0 or less: none. The loose sleeve is not counted.
+func hand_room(T: Transform3D, h: UrHand) -> float:
+	const FAR := UrHand.LIFE_CLEAR + UrHand.LIFE_FULL + 0.02     # further than this from a thing, it does not matter
+	var held: Variant = carried.get(h)
+	if held != null and not is_instance_valid(held):
+		held = null
+	var grip_w := T * h.grip_local()
+	var held_r := Vector2(PIECE_H / 2.0, PIECE_R)                  # (half height, half width) of what it holds
+	if held == null and grip.active() and grip.hand == h:
+		held_r = Vector2.ONE * grip.R * UrHand.CM                   # a die
+	elif h == lhand:
+		held_r = Vector2(1.3, 2.4) * DateBowl.CM                    # a date, or its stone
+	var heap := heap_top()
+	var hi := maxf(heap, 0.8) + FAR               # nothing on the table stands higher than this
+	var low: Array = [[grip_w, held_r.x, held_r.y]]
+	var hb: Array = bowl.hand_balls(T, h)
+	for k in hb.size() - 2:                       # (the last two are the sleeve)
+		var p: Vector3 = hb[k][0]
+		if p.y - float(hb[k][1]) < hi:
+			low.append([p, hb[k][1], hb[k][1]])
+	if low.size() == 1 and grip_w.y - held_r.x > hi + 0.5:
+		return grip_w.y - held_r.x - hi           # well above everything
+	# the round things: [centre, radius, top]
+	var round: Array = [[BOWL_POS, 8.0 * DateBowl.CM, heap]]
+	for p in 2:
+		for n in pnodes[p]:
+			if n != held:
+				var c: Vector3 = (n as Node3D).position
+				round.append([c, PIECE_R, c.y + PIECE_H / 2.0])
+	for i in dice_bodies.size():
+		if not (grip.active() and grip.mode[i] != DiceGrip.TABLE):      # (not one in the hand)
+			var c: Vector3 = (dice_bodies[i] as Node3D).global_position
+			round.append([c, grip.R * UrHand.CM, c.y + grip.R * UrHand.CM])
+	for n in pits:
+		if is_instance_valid(n):
+			var c: Vector3 = (n as Node3D).global_position
+			round.append([c, 1.6 * DateBowl.CM, c.y + 0.8 * DateBowl.CM])
+	var rects := _room_rects()
+	var m := INF
+	var under := BY                               # the top of whatever lies under what it holds
+	for k in low.size():
+		var p: Vector3 = low[k][0]
+		var bottom := p.y - float(low[k][1])
+		var wide := float(low[k][2])
+		for r in round:
+			var over := bottom - float(r[2])
+			if over > FAR:
+				continue
+			var gap := Vector2(p.x - r[0].x, p.z - r[0].z).length() - float(r[1]) - wide
+			if k == 0 and gap < 0.0:
+				under = maxf(under, r[2])
+			m = minf(m, maxf(gap, over))
+		for ri in rects.size():
+			var r: Array = rects[ri]
+			var over := bottom - float(r[2])
+			if over > FAR:
+				continue
+			var q: Vector3 = (r[0] as Transform3D) * p
+			var e := Vector2(absf(q.x) - r[1].x, absf(q.z) - r[1].y)
+			var gap := Vector2(maxf(e.x, 0.0), maxf(e.y, 0.0)).length() + minf(maxf(e.x, e.y), 0.0) - wide
+			if k == 0 and gap < 0.0:
+				under = maxf(under, r[2])
+			# (the slabs are the ground here: over them level movement touches nothing, and what
+			# is held being lifted off them is reckoned below)
+			if ri >= 5:
+				m = minf(m, maxf(gap, over))
+	return minf(m, grip_w.y - held_r.x - under)
 
 
 ## Push a held stone along the board through the given points, the wood whispering under it.
@@ -2532,6 +2679,7 @@ func hand_let_go(h: UrHand, node: Node3D, land := "") -> void:
 	h.pose_rate = 16.0
 	h.set_pose_dict(h.grasp_pose(UrHand.STONE_OPEN_R))
 	h.effort = 0.0
+	carried.erase(h)
 	settle(node)
 	await get_tree().create_timer(0.12).timeout
 	h.pose_rate = 9.0
@@ -2707,7 +2855,7 @@ func hand_throw(p: int) -> void:
 		return
 	# 4. cast: the fist swings forward and down and opens, the dice drop out of it
 	var dir := txf.basis * Vector3(0, 0, -1.0 if p == HUMAN else 1.0)
-	hand_move(h, start + dir * 1.0 + Vector3(0, -0.45, 0), 0.24, 0.0, FIST_PITCH + 12.0)
+	hand_move(h, start + dir * 1.0 + Vector3(0, -0.45, 0), 0.24, 0.0, FIST_PITCH + 12.0, null, 0.0, NAN, NAN, false)   # a fling, not a reach
 	await get_tree().create_timer(0.1).timeout
 	if e != epoch:
 		return
@@ -3238,6 +3386,8 @@ func human_grab(idx: int) -> void:
 	if e != epoch or sel_idx != idx or phase != Phase.MOVE:
 		return
 	human_holding = true
+	carried[h] = node
+	drag_at = node.position
 	if release_pending != null:
 		var pt: Vector2 = release_pending
 		release_pending = null
@@ -3299,11 +3449,11 @@ func _process(delta: float) -> void:
 	watch_flies(delta)
 	if dragging and human_holding and sel_idx != -1:
 		# the stone in the human's fingers follows the mouse, with a hand's slight lag
-		var node: Node3D = pnodes[HUMAN][sel_idx]
-		node.position = node.position.lerp(drag_target, 1.0 - exp(-16.0 * delta))
+		# (the stone goes with the hand: see _carry_along)
+		drag_at = drag_at.lerp(drag_target, 1.0 - exp(-16.0 * delta))
 		var h: UrHand = hands[HUMAN]
 		h.move_id += 1
-		h.place(node.position, hand_fwd(h, node.position), 26.0)
+		h.place(drag_at, hand_fwd(h, drag_at), 26.0)
 	var mov := movable_indices()
 	var hover := -1
 	if dragging:

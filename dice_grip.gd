@@ -16,6 +16,7 @@ extends RefCounted
 ## pushed into them.
 
 const CM := UrHand.CM
+const JAMMED := 0.3            # a die this deep (cm) in a finger forces it open, however little that helps
 const TOL := 0.04              # how far skin may give under a die it presses on (cm)
 const INV_I := 1.25            # a die's inverse moment of inertia per unit mass (1/cm^2)
 const GRAV := 60.0 / UrHand.CM # the project's gravity (60 world units/s^2) in cm/s^2
@@ -63,6 +64,8 @@ var rim_top := 0.42            # world height of the rim boards' tops
 var rim_t := 0.3               # their thickness (world)
 var table_floor := 0.0         # tray floor height (world) before any throw has measured it
 var palm_shell := PackedVector3Array()   # points over the palm's surface (hand-local cm)
+var push_last := {}            # hand -> [how far it was last pushed out of the tray (world), on which frame]
+const PUSH_KEEP := 0.93        # how much of that push it keeps into the next frame if nothing holds it there
 var knock := 0.0               # strongest die-on-die knock this step (cm/s), for the sound
 var acc_t := 0.0
 const SIM_DT := 1.0 / 60.0
@@ -552,10 +555,33 @@ func _drive_fingers(dt: float) -> void:
 					cs[k] = c1
 					continue
 			_set_joint(d, st, k, c)
-			if _pen_from(d, k) > TOL:
-				# a die is pressing into the finger here: it gives way, a little at a time
-				cs[k] = maxf(0.0, c - 4.0 * dt)
-				_set_joint(d, st, k, cs[k])
+			var pen := _pen_from(d, k)
+			if pen > TOL:
+				# a die is pressing into the finger here: it gives way, only as far as it is
+				# pressed (and no faster than a finger yields), and only if giving way frees
+				# it, or it is jammed hard in and giving way eases that: a die against the
+				# side of the finger is not helped by the finger uncurling. Backing right off
+				# every time, it would come away from the die, close on it again the next
+				# moment, be pressed again, and so chatter
+				var back := maxf(0.0, c - 4.0 * dt)
+				_set_joint(d, st, k, back)
+				var pen_b := _pen_from(d, k)
+				if pen_b > TOL and (pen < JAMMED or pen_b > pen - 0.05):
+					# no help, or not enough to free it and it is only pressed a little: the
+					# finger stays as it is (the die is pushed off it, as off any part of the hand)
+					_set_joint(d, st, k, c)
+					continue
+				if pen_b <= TOL:
+					var top := c
+					for it in 5:
+						var mid := (back + top) * 0.5
+						_set_joint(d, st, k, mid)
+						if _pen_from(d, k) <= TOL:
+							back = mid
+						else:
+							top = mid
+				cs[k] = back
+				_set_joint(d, st, k, back)
 				continue
 			if c1 <= c:
 				continue
@@ -805,7 +831,18 @@ func solve_push(contacts: Array) -> Vector3:
 ## the tray's floor and rim (world). UrHand calls this every time it is placed.
 func hand_push(T: Transform3D, h: UrHand) -> Vector3:
 	var cs := h.capsules()
+	# There is often more than one way out (up over a rim board, or back off it sideways;
+	# out of a corner either way), and which is shortest changes as the fingers move: found
+	# afresh each frame, the hand would jump from one to the other and back. So it starts
+	# from where it was last pushed to, eased a little back toward where it wants to be,
+	# and only moves on from there as far as it must.
+	var f := Engine.get_process_frames()
 	var d := Vector3.ZERO
+	if push_last.has(h):
+		var pl: Array = push_last[h]
+		var gone: int = f - int(pl[1])
+		if gone <= 6:
+			d = (pl[0] as Vector3) * pow(PUSH_KEEP, gone)
 	# the surface turns as the hand moves off it (round edges, a corner of floor and
 	# rim): look again from where it was pushed to, until nothing is in the wood
 	for it in 5:
@@ -815,6 +852,7 @@ func hand_push(T: Transform3D, h: UrHand) -> Vector3:
 		d += step
 		if step.length() < 0.002 * CM:
 			break
+	push_last[h] = [d, f]
 	return d
 
 

@@ -997,6 +997,8 @@ func _pinned(p: Vector3, r: float, g: Array) -> bool:
 
 ## The balls (world: [centre, radius]) of the dates in the bowl (the one being taken left
 ## out), worked out once a frame.
+var _push_last := {}        # hand -> [how far it was last pushed out (world), on which frame]
+const PUSH_KEEP := 0.93      # how much of that push it keeps into the next frame if nothing holds it there
 var _grounded_frame := -1
 var _grounded_cache: Array = []
 func _grounded() -> Array:
@@ -1014,17 +1016,82 @@ func _grounded() -> Array:
 	return _grounded_cache
 
 
+## One finger bent out of the way: its tip curled in by `curl`, and lifted at the knuckle
+## by `lift`. Returns the three joints' bends, from `base`.
+func _bent(base: Array, lim: Array, curl: float, lift: float) -> Array:
+	var out: Array = []
+	for sg in 3:
+		var v: Vector2 = base[sg]
+		v.x += curl * [0.25, 0.45, 0.6][sg]
+		if sg == 0:
+			v.x -= lift * 0.6
+		var l: Array = lim[sg]
+		v.x = clampf(v.x, l[0], l[1])
+		out.append(v)
+	return out
+
+
+## Put a finger's three joints as `v` on the skeleton only (its pose is not changed).
+func _show(h: UrHand, ids: Array, v: Array) -> void:
+	for sg in 3:
+		var q: Vector2 = v[sg]
+		h.skel.set_bone_pose_rotation(ids[sg], h.rest_rot[ids[sg]] * Quaternion(Vector3.RIGHT, deg_to_rad(q.x)) * Quaternion(Vector3.UP, deg_to_rad(q.y)))
+
+
+## The least a finger must bend one way (0: curl the tip in, 1: lift at the knuckle) to
+## come clear ([amount, 0.0]), or, if it cannot, the bend that leaves it least far in
+## ([amount, how far]).
+func _least_bend(T: Transform3D, h: UrHand, dg: String, grounded: Array, ids: Array, base: Array, lim: Array, mode: int, pen0: float) -> Array:
+	var best := [0.0, pen0]
+	for k in range(1, 11):
+		var amt := 7.0 * k
+		_show(h, ids, _bent(base, lim, amt if mode == 0 else 0.0, amt if mode == 1 else 0.0))
+		var p := _digit_pen(T, h, dg, grounded)
+		if p <= 0.0:
+			# somewhere in this last step it came clear: just where, so that it rests on
+			# what it meets (and stays there from frame to frame) instead of springing off
+			# it by a whole step
+			var lo := amt - 7.0
+			var hi := amt
+			for it in 5:
+				var mid := (lo + hi) * 0.5
+				_show(h, ids, _bent(base, lim, mid if mode == 0 else 0.0, mid if mode == 1 else 0.0))
+				if _digit_pen(T, h, dg, grounded) <= 0.0:
+					hi = mid
+				else:
+					lo = mid
+			return [hi, 0.0]
+		if p < float(best[1]) - 1e-6:
+			best = [amt, p]
+	return best
+
+
 ## A finger that meets the clay gives way, as a real one does: it curls its tip in, or
 ## lifts at the knuckle, by as little as clears it (the most it can, if nothing does).
-## Bends the hand's present pose (h.pose_cur): the pose it is heading for is untouched, so
-## the finger straightens again as the hand comes away. Returns how much was bent.
-func conform(T: Transform3D, h: UrHand) -> float:
+## The bend is kept apart from the hand's pose (UrHand.pose_give, on top of pose_cur),
+## so the pose goes on as it was going and the finger follows the clay as the hand moves,
+## straightening as it comes away. Returns how much was bent.
+## With `steady` (the hand as it is drawn, frame after frame) a finger moves as a finger
+## can: having given way one way it goes on that way while that serves, rather than
+## curling one moment and lifting the next; it bends no faster than BEND_STEP a frame
+## (what it has not yet got out of the way of, the hand is held off by, as by anything
+## that cannot give), and unbends slower, and not at once. Without it each
+## call stands alone (trying places out).
+var _bend := {}           # [hand, digit] -> [curl, lift, on which frame, frames it has been free to unbend]
+const BEND_STEP := 9.0    # the most a finger's give grows in a frame (degrees of bend)
+const BEND_EASE := 3.0    # the most it lessens in a frame
+const BEND_WAIT := 4      # frames it must have been free to unbend before it does
+
+
+func _toward(from: float, to: float, up: float, down: float) -> float:
+	return minf(from + up, to) if to > from else maxf(from - down, to)
+
+
+func conform(T: Transform3D, h: UrHand, steady := false) -> float:
 	var total := 0.0
 	var grounded := _grounded()
+	var f := Engine.get_process_frames()
 	for dg in UrHand.DIGITS:
-		var pen := _digit_pen(T, h, dg, grounded)
-		if pen <= 0.0:
-			continue
 		var ids: Array = []
 		var base: Array = []
 		for sg in 3:
@@ -1032,36 +1099,60 @@ func conform(T: Transform3D, h: UrHand) -> float:
 			ids.append(i)
 			base.append(h.pose_cur[i])
 		var lim: Array = UrHand.LIMITS["thumb" if dg == "thumb" else "finger"]
-		var best := [pen, 0.0, 0]
-		for k in range(1, 11):
-			var amt := 7.0 * k
-			for mode in 2:
-				for sg in 3:
-					var v: Vector2 = base[sg]
-					if mode == 0:                     # curl the tip in
-						v.x += amt * [0.25, 0.45, 0.6][sg]
-					elif sg == 0:                     # lift at the knuckle
-						v.x -= amt * 0.6
-					var l: Array = lim[sg]
-					v.x = clampf(v.x, l[0], l[1])
-					h.put_bone(ids[sg], v)
-				var p := _digit_pen(T, h, dg, grounded)
-				if p < float(best[0]) - 1e-6:
-					best = [p, amt, mode]
-			if float(best[0]) <= 0.0:
-				break
+		var was: Array = _bend.get([h, dg], [0.0, 0.0, -1000, 0])
+		var gone: int = f - int(was[2])
+		var recent := steady and gone <= 6
+		_show(h, ids, base)
+		var pen := _digit_pen(T, h, dg, grounded)
+		var want := Vector2.ZERO          # (curl, lift)
+		if pen > 0.0:
+			var a: Array = _least_bend(T, h, dg, grounded, ids, base, lim, 0, pen)
+			var b: Array = _least_bend(T, h, dg, grounded, ids, base, lim, 1, pen)
+			# the way that leaves it least far in; of two that clear it, the smaller bend
+			var mode := 0
+			if float(b[1]) < float(a[1]) - 1e-6 or (float(b[1]) <= 0.0 and float(a[1]) <= 0.0 and float(b[0]) < float(a[0])):
+				mode = 1
+			if recent and float(was[0]) + float(was[1]) > 0.5:
+				# ... but it keeps to the way it was giving unless the other is clearly better
+				var way := 0 if float(was[0]) >= float(was[1]) else 1
+				if way != mode:
+					var keep: Array = a if way == 0 else b
+					var other: Array = b if way == 0 else a
+					var better := false
+					if float(keep[1]) <= 0.0:
+						better = float(other[1]) <= 0.0 and float(other[0]) < 0.6 * float(keep[0]) - 3.0
+					else:
+						better = float(other[1]) <= 0.0 or float(other[1]) < float(keep[1]) - 0.05 * CM
+					if not better:
+						mode = way
+				# if nothing clears it, the bend that leaves it least far in is anybody's
+				# guess from one frame to the next: it stays about as it is
+				var got: Array = a if mode == 0 else b
+				if float(got[1]) > 0.0 and absf(float(got[0]) - float(was[mode])) < 30.0:
+					got = [was[mode], got[1]]
+				want = Vector2(got[0], 0.0) if mode == 0 else Vector2(0.0, got[0])
+			else:
+				want = Vector2(a[0], 0.0) if mode == 0 else Vector2(0.0, b[0])
+		var now := want
+		var quiet := 0                    # frames running that it could have unbent
+		if recent:
+			# it bends as fast as it may, but unbends only once it has been free to for a few
+			# frames running, and then gently: what it rests on is seldom quite still (dates
+			# shift under the hand), and a finger does not spring back at every let-up
+			quiet = int(was[3]) + gone if want.x <= float(was[0]) and want.y <= float(was[1]) else 0
+			var up := BEND_STEP * gone
+			var down := BEND_EASE * gone if quiet >= BEND_WAIT else 0.0
+			now = Vector2(_toward(float(was[0]), want.x, up, down), _toward(float(was[1]), want.y, up, down))
+		var v := _bent(base, lim, now.x, now.y)
+		_show(h, ids, v)
 		for sg in 3:
-			var v: Vector2 = base[sg]
-			if int(best[2]) == 0:
-				v.x += float(best[1]) * [0.25, 0.45, 0.6][sg]
-			elif sg == 0:
-				v.x -= float(best[1]) * 0.6
-			var l: Array = lim[sg]
-			v.x = clampf(v.x, l[0], l[1])
-			# (the present pose only: put_bone would make it the target too)
-			h.pose_cur[ids[sg]] = v
-			h.skel.set_bone_pose_rotation(ids[sg], h.rest_rot[ids[sg]] * Quaternion(Vector3.RIGHT, deg_to_rad(v.x)) * Quaternion(Vector3.UP, deg_to_rad(v.y)))
-		total += float(best[1])
+			if now != Vector2.ZERO:
+				h.pose_give[ids[sg]] = (v[sg] as Vector2) - (base[sg] as Vector2)
+			else:
+				h.pose_give.erase(ids[sg])
+		if steady:
+			_bend[[h, dg]] = [now.x, now.y, f, quiet]
+		total += now.x + now.y
 	return total
 
 
@@ -1085,14 +1176,29 @@ func hand_clear_parts(T: Transform3D, h: UrHand) -> Vector2:
 ## finger that cannot bend further) is pushed out the shortest way, never into it.
 func hand_push(T: Transform3D, h: UrHand) -> Vector3:
 	if T.origin.distance_to(global_position) > 30.0 * CM + 2.0:
+		if not h.pose_give.is_empty():
+			h.pose_give.clear()
+			h._apply_pose()
 		return Vector3.ZERO
-	conform(T, h)
+	# (there is often more than one way out, and found afresh each frame the hand would jump
+	# from one to another: it starts from where it was last pushed to, eased a little back
+	# toward where it wants to be, and moves on from there only as far as it must)
+	var f := Engine.get_process_frames()
+	var d := Vector3.ZERO
+	if _push_last.has(h):
+		var pl: Array = _push_last[h]
+		var gone: int = f - int(pl[1])
+		if gone <= 6:
+			d = (pl[0] as Vector3) * pow(PUSH_KEEP, gone)
+	# (the fingers give way for where the hand is meant to be, not for where it is pushed
+	# to: the one must not depend on the other, or they hunt, the fingers unbending as the
+	# hand is pushed off and the hand settling back as they bend)
+	conform(T, h, true)
 	# the deepest contact first, straight out of the clay, until nothing is in it: back into
 	# the bowl if the hand is reaching into it (never on through the wall), else outward.
 	# A date that cannot get out of the way is as solid: the hand comes to rest on it.
 	var inward := reaching_in(T * h.grip_local())
 	var grounded := _grounded() if hand_solid_on else []
-	var d := Vector3.ZERO
 	for it in 8:
 		var T2 := T
 		T2.origin += d
@@ -1126,6 +1232,7 @@ func hand_push(T: Transform3D, h: UrHand) -> Vector3:
 			d += _cavity_grad(at) * maxf(worst, float(0.0) - cavity_sdf(at))
 		else:
 			d += _clay_grad(at) * worst
+	_push_last[h] = [d, f]
 	return d
 
 

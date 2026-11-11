@@ -30,6 +30,11 @@ var shoulder: Vector3            # where this arm's shoulder normally is (world)
 var person_right: Vector3        # the side this arm is on: the player's right for the right hand,
                                  # his left for the left (world, horizontal); the elbow goes out that way
 var lean := 0.45                 # how far his shoulder follows the hand sideways
+var draw_back := 0.0             # (world) drawing the hand in nearer than this to his shoulder, he takes the
+                                 # whole arm back with it (shoulder and all) rather than folding it up
+                                 # tight: 0 = never (the arm folds as far as it must)
+const DRAW_EASE := 1.0
+var table_dir := Vector3.ZERO    # the level way from his shoulder to the table (for draw_back)
 
 var skel: Skeleton3D
 var bones := {}                  # name -> index
@@ -38,6 +43,8 @@ var rest_rot := {}               # index -> Quaternion
 var pose_cur := {}               # index -> Vector2(flex, yaw) degrees
 var pose_tgt := {}
 var pose_rate := 9.0
+var pose_give := {}              # index -> Vector2: how far a joint is bent out of its pose by what it
+                                 # rests against (the bowl's clay, a date), on top of pose_cur
 var shake := Vector3.ZERO        # extra wrist offset (world), e.g. rattling the dice
 var aim_fwd := Vector3.FORWARD
 var aim_pitch := 20.0
@@ -69,6 +76,16 @@ var swing_live := false
 var aim_yaw := 0.0               # turn of the hand about the vertical, degrees (e.g. to line up with a die)
 var solid := Callable()          # (T, hand) -> world push keeping the hand out of solid things
 var bump := Vector3.ZERO         # how far the last placement was pushed out of them (world)
+var room := Callable()           # (T, hand) -> how much room (world) the hand, and what it holds, has to
+                                 # move level or upward; without it the hand keeps dead still
+var live := Vector3.ZERO         # how far the hand's own small movements have carried it from where it
+                                 # was put (world): what it holds goes with it
+var life_t := 0.0
+var life_gain := 0.0             # how much of that movement it has just now (0..1): lost at once as it
+                                 # nears anything, found again only slowly once it is clear
+var life_ph := PackedFloat32Array()   # this hand's own rhythm (phases, and how fast it breathes)
+const LIFE_CLEAR := 0.03         # (world) with less room than this the hand is steadied by what it is at: still
+const LIFE_FULL := 0.4           # and with this much more it moves freely (a wide margin: it fades gently even on a quick approach)
 var bone_r := {}                 # index -> Vector2(r0, r1): radius of the finger flesh at either end (cm)
 var bone_flat := {}              # index -> how much the finger is flattened (palm to back)
 
@@ -1592,6 +1609,7 @@ func set_pose_dict(d: Dictionary, snap := false) -> void:
 	for i in d:
 		pose_tgt[i] = d[i]
 	if snap:
+		pose_give.clear()
 		for i in pose_tgt:
 			pose_cur[i] = pose_tgt[i]
 		_apply_pose()
@@ -1711,6 +1729,8 @@ func _apply_pose() -> void:
 		if i == bones["forearm"] or i == bones["upperarm"] or i == bones["hand"]:
 			continue
 		var v: Vector2 = pose_cur[i]
+		if pose_give.has(i):
+			v += pose_give[i]
 		skel.set_bone_pose_rotation(i, rest_rot[i] * Quaternion(Vector3.RIGHT, deg_to_rad(v.x)) * Quaternion(Vector3.UP, deg_to_rad(v.y)))
 
 
@@ -1729,7 +1749,7 @@ func _update_skin(delta := -1.0) -> void:
 	fl.resize(18)
 	for i in pose_cur:
 		if i < 18:
-			fl[i] = (pose_cur[i] as Vector2).x
+			fl[i] = (pose_cur[i] as Vector2).x + ((pose_give[i] as Vector2).x if pose_give.has(i) else 0.0)
 	var grip := 0.0
 	var ext := Vector4.ZERO
 	var k := 0
@@ -1812,11 +1832,49 @@ func place(grip: Vector3, fwd: Vector3, pitch := 20.0, roll := 0.0) -> void:
 	_place_now()
 
 
+## No living hand holds dead still. Where the hand would be without being told to move
+## (world): it rises and settles a little with his breath and wanders with his posture, a
+## millimetre or two in all, and trembles faintly, more the harder it grips. Never below
+## where it was put: that is its lowest.
+func _life() -> Vector3:
+	if life_ph.is_empty():
+		for i in 10:
+			life_ph.append(randf() * TAU)
+		life_ph.append(randf_range(0.21, 0.27))      # breaths per second
+		life_t = randf() * 60.0
+	var t := life_t * TAU
+	var breath := sin(t * life_ph[10] + life_ph[0])
+	var along := Vector3(aim_fwd.x, 0.0, aim_fwd.z).normalized()
+	var d := Vector3.UP * (0.06 * (1.0 + breath)) + along * (0.04 * breath)
+	d += Vector3(0.06 * sin(t * 0.113 + life_ph[1]) + 0.035 * sin(t * 0.31 + life_ph[2]),
+		0.03 * (1.0 + sin(t * 0.171 + life_ph[3])),
+		0.06 * sin(t * 0.087 + life_ph[4]) + 0.035 * sin(t * 0.37 + life_ph[5]))
+	var tr := (0.004 + 0.028 * tension) / 1.6
+	d += Vector3(sin(t * 9.4 + life_ph[6]) + 0.6 * sin(t * 11.3 + life_ph[7]),
+		1.6 + sin(t * 10.1 + life_ph[8]) + 0.6 * sin(t * 8.3 + life_ph[9]),
+		sin(t * 9.9 + life_ph[7]) + 0.6 * sin(t * 12.1 + life_ph[6])) * tr
+	return d * CM       # (the sums above are in cm)
+
+
 func _place_now() -> void:
 	var b := hand_basis(aim_fwd, aim_pitch, aim_roll)
 	var gl := grip_local() * CM
 	var W := grip_target + shake - b * gl
-	var T := Transform3D(b.scaled(Vector3(CM, CM, CM)), _reachable_wrist(W))
+	var bs := b.scaled(Vector3(CM, CM, CM))
+	var T := Transform3D(bs, _reachable_wrist(W))
+	# its own small movements, only where it has room: near anything (a stone it is closing
+	# on or has just set down, the tray, the bowl) they die away. Sideways they never take
+	# it more than half the way to the nearest thing, and never downward at all
+	live = Vector3.ZERO
+	if room.is_valid():
+		var free := float(room.call(T, self)) - LIFE_CLEAR
+		life_gain = clampf(free / LIFE_FULL, 0.0, life_gain)
+		if life_gain > 0.0:
+			var l := _life() * life_gain
+			l = _reachable_wrist(W + l) - T.origin
+			var flat := Vector3(l.x, 0.0, l.z).limit_length(0.5 * free)
+			live = Vector3(flat.x, maxf(l.y, 0.0), flat.z)
+			T.origin += live
 	# solid things in the way (the dice tray): the hand comes to rest on them, never in them
 	if solid.is_valid():
 		var push: Vector3 = solid.call(T, self)
@@ -1847,14 +1905,23 @@ func grip_world() -> Vector3:
 func _shoulder_for(W: Vector3, max_lean_cm := MAX_LEAN_CM) -> Vector3:
 	var a := FOREARM_CM * CM
 	var b := UPPERARM_CM * CM
-	var S := shoulder
-	S.x = lerpf(shoulder.x, W.x, lean)
+	# taking his hand off the table he draws the arm back, shoulder and all, as it is: he
+	# does not fold it up against himself (the elbow would swing right round, through the
+	# view, as the wrist came past the shoulder)
+	var home := shoulder
+	if draw_back > 0.0:
+		# (coming on gently over the last DRAW_EASE before that distance)
+		var short := draw_back - (W - shoulder).dot(table_dir)
+		if short > -DRAW_EASE:
+			home -= table_dir * (short if short > DRAW_EASE else (short + DRAW_EASE) * (short + DRAW_EASE) / (4.0 * DRAW_EASE))
+	var S := home
+	S.x = lerpf(home.x, W.x, lean)
 	var to_s := S - W
 	var d := clampf(to_s.length(), absf(a - b) + 0.5, (a + b) * REACH_FRAC)
 	S = W + to_s.normalized() * d
-	var off := S - shoulder
+	var off := S - home
 	if off.length() > max_lean_cm * CM:
-		S = shoulder + off.normalized() * (max_lean_cm * CM)
+		S = home + off.normalized() * (max_lean_cm * CM)
 	return S
 
 
@@ -1947,6 +2014,8 @@ func _process(delta: float) -> void:
 		pump = maxf(pump - PUMP_EBB * delta, 0.0)
 		_sweat(delta)
 		return
+	life_t += delta
+	life_gain = minf(life_gain + delta / 0.6, 1.0)
 	var k := 1.0 - exp(-pose_rate * delta)
 	for i in pose_tgt:
 		pose_cur[i] = (pose_cur[i] as Vector2).lerp(pose_tgt[i], k)
