@@ -4,7 +4,7 @@ extends SceneTree
 # The player's own save slot is kept aside and put back afterwards.
 func _init() -> void:
 	var out: String = OS.get_environment("SHOT_DIR")
-	var path: String = load("res://main.gd").SAVE_PATH
+	var path: String = load("res://src/main.gd").SAVE_PATH
 	var kept: Variant = FileAccess.get_file_as_string(path) if FileAccess.file_exists(path) else null
 	var m = load("res://main.tscn").instantiate()
 	root.add_child(m)

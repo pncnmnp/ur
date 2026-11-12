@@ -121,13 +121,13 @@ The app goes in `build/macos/Royal Game of Ur.app`. Set `GODOT` if Godot is not 
 
 | File | Contents |
 | --- | --- |
-| [ur_game.gd](ur_game.gd) | The rules |
-| [ur_ai.gd](ur_ai.gd) | Vidur's moves |
-| [main.gd](main.gd) | The table, turns, input and camera |
-| [hand.gd](hand.gd), [dice_grip.gd](dice_grip.gd) | The hands and how they hold the dice |
-| [date_bowl.gd](date_bowl.gd), [flies.gd](flies.gd) | The dates and the flies |
-| [traces.gd](traces.gd) | Marks in the sand and dust on the wood |
-| [ambience.gd](ambience.gd) | Wind, cloth and chewing sounds |
+| [ur_game.gd](src/ur_game.gd) | The rules |
+| [ur_ai.gd](src/ur_ai.gd) | Vidur's moves |
+| [main.gd](src/main.gd) | The table, turns, input and camera |
+| [hand.gd](src/hand.gd), [dice_grip.gd](src/dice_grip.gd) | The hands and how they hold the dice |
+| [date_bowl.gd](src/date_bowl.gd), [flies.gd](src/flies.gd) | The dates and the flies |
+| [traces.gd](src/traces.gd) | Marks in the sand and dust on the wood |
+| [ambience.gd](src/ambience.gd) | Wind, cloth and chewing sounds |
 | [tools/](tools/) | Python scripts that make the textures, sounds, dust and hand mesh |
 | [tests/](tests/) | Godot scripts that check and take pictures of one part of the game |
 
