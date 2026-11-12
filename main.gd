@@ -108,7 +108,7 @@ const SFX_DB := {
 	"die_wall": -3.0, "die_floor": -2.0, "die_die": -7.0, "dice_shake": -5.0,
 	"stone_place": -4.0, "stone_stone": -4.0, "stone_lift": -22.0, "stone_slide": -8.0,
 	"date_pick": -20.0, "pit_drop": -15.0,
-	"cloth_move": -14.0, "hand_wood": -16.0, "hand_leather": -18.0,
+	"cloth_move": -28.0, "hand_wood": -16.0, "hand_leather": -18.0,
 	"chew": -18.0, "sniff": -16.0, "nose_out": -22.0,
 }
 

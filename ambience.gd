@@ -20,7 +20,7 @@ const AIR_DB := -31.0          # the breeze that is always there
 const AIR_GUST_DB := 3.0       # and how much it comes up in a gust
 const GUST_DB := -20.0          # a full gust (a thick cloud's edge)
 const SAND_DB := -26.0         # sand on the move in it
-const RUB_DB := -11.0          # a sleeve, the arm at full speed
+const RUB_DB := -20.0          # a sleeve, the arm at full speed
 const DRAG_DB := -15.0         # a hem over sand, likewise
 const CHEW_DB := 0.0           # (on top of the sound's own level in main.gd's SFX_DB)
 

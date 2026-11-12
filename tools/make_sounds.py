@@ -416,25 +416,40 @@ def lumps(rng, t, spans):
     return e
 
 
+CLOTH_SOFT = [(110, -34), (280, -10), (650, -2), (1100, 0), (2000, -5), (3600, -15), (6500, -32)]
+CLOTH_BRIGHT = [(700, -34), (1600, -4), (2600, 0), (4200, -8), (7000, -26)]
+
+
 def cloth_body(rng, n, e, wrap=False):
-    """Coarse wool or linen rubbing on itself, moving as e (0..1) says: the soft rasp of
-    thread dragging over thread (brighter the faster it goes), broken into grain by the
-    fibres that catch and let go, and under it the dull flop of heavy folds shifting."""
-    lo = pnoise(rng, n, lo=450, hi=2100)
-    hi = pnoise(rng, n, lo=1900, hi=5600)
-    # stick and slip: the rasp comes in little rushes as one fold after another lets go
-    # (a few hundred a second, each a couple of milliseconds), and in slower surges as
-    # whole folds drag and free themselves
-    k = np.hanning(int(0.003 * SR))
-    hits = np.where(rng.random(n) < 260 * (0.3 + e) / SR, rng.lognormal(0, 0.9, n), 0.0)
-    catch = cconv(hits, k) if wrap else np.convolve(hits, k)[:n]
-    catch /= catch.mean() + 1e-9
-    surge = np.clip(1 + 0.45 * unit(pnoise(rng, n, lo=5 if wrap else None, hi=22)), 0.2, 2.2)
-    rasp = (unit(lo) * e + 0.75 * unit(hi) * e ** 1.8) * (0.22 + 0.78 * np.minimum(catch, 5.0)) * surge
+    """Coarse wool or linen rubbing on itself, moving as e (0..1) says. Heavy cloth is a
+    soft, dull sound: nearly all of it below 3 kHz, nothing crisp (that is paper, or silk).
+    What makes it cloth is how it moves. Thread rides over thread, so the rub has the
+    weave in it: a faint purr at the rate the threads pass (a hundred or two a second,
+    following the speed), never steady, from two layers that are not quite in step. And it
+    comes in soft rushes, a few to a dozen a second, as one fold after another slides and
+    stops. Under it, the low breath of air the moving folds push out of their way."""
+    soft = spectrum(rng, n, CLOTH_SOFT)
+    bright = spectrum(rng, n, CLOTH_BRIGHT)
+    # the weave: threads passing, faster as the cloth moves faster
+    purr = np.ones(n)
+    for depth in (0.3, 0.2):
+        f = rng.uniform(120, 190) * (0.35 + 0.65 * e) * np.exp(0.12 * unit(pnoise(rng, n, lo=1.0 if wrap else None, hi=9)))
+        ph = np.cumsum(f) / SR
+        if wrap:
+            ph *= np.round(ph[-1]) / ph[-1]          # a whole number of threads in the loop
+        purr *= 1 + depth * np.sin(2 * np.pi * ph + rng.uniform(0, 6.28))
+    # the rushes: folds sliding and stopping, each a soft swell of a few hundredths of a second
+    rush = np.zeros(n)
+    for width in (0.03, 0.055, 0.09, 0.14):
+        k = np.hanning(int(width * SR))
+        hits = np.where(rng.random(n) < 3.2 * (0.4 + e) / SR, rng.lognormal(0, 0.6, n), 0.0)
+        rush += cconv(hits, k)
+    rush /= rush.mean() + 1e-9
+    rub = (soft * e + 0.3 * bright * e ** 2.2) * purr * (0.3 + 0.7 * np.minimum(rush, 3.5))
     de = np.abs(np.gradient(e))
     de /= de.max() + 1e-9
-    flop = unit(pnoise(rng, n, lo=90, hi=380)) * (0.35 * e + 0.65 * de)
-    return rasp + 0.5 * flop
+    air = unit(pnoise(rng, n, lo=90, hi=420)) * (0.4 * e + 0.6 * de) * (0.5 + 0.5 * np.minimum(rush, 3.5))
+    return band(rub + 0.6 * air, lo=80, hi=4200)
 
 
 def cloth_move(rng):
@@ -446,12 +461,7 @@ def cloth_move(rng):
     for _ in range(rng.choice([1, 2])):
         spans.append((rng.uniform(0.45, 0.85) * dur, rng.uniform(0.2, 0.4) * dur, rng.uniform(0.3, 0.7)))
     e = lumps(rng, t, spans)
-    y = cloth_body(rng, n, e / e.max())
-    for _ in range(rng.integers(2, 6)):               # a crease pulled straight: a tiny dry tick
-        at = int(rng.uniform(0.1, 0.8) * dur * SR)
-        tk = burst(rng, 0.004, 0.0008, lo=1500, hi=4500) * rng.uniform(0.6, 1.6) * e[at] / e.max()
-        y[at: at + len(tk)] += tk[: n - at]
-    return band(y, lo=80, hi=6000)
+    return cloth_body(rng, n, e / e.max())
 
 
 def cloth_rub(rng):
@@ -459,7 +469,7 @@ def cloth_rub(rng):
     loud as the arm is fast)."""
     n = int(4.0 * SR)
     e = np.clip(0.7 + 0.22 * unit(pnoise(rng, n, lo=0.4, hi=4.0)), 0.25, 1.2)
-    return band(cloth_body(rng, n, e, True), lo=80, hi=6000)
+    return cloth_body(rng, n, e, True)
 
 
 def sleeve_sand(rng):
