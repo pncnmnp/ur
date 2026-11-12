@@ -100,6 +100,7 @@ var tray_walls: Array = []
 var sfx := {}
 var sfx_pool: Array = []
 var sfx_next := 0
+var amb: Ambience                   # the wind, their sleeves, his chewing
 var die_prev_v: Array = []
 var die_prev_w: Array = []
 var die_cool: Array = [0.0, 0.0, 0.0, 0.0]
@@ -107,6 +108,8 @@ const SFX_DB := {
 	"die_wall": -3.0, "die_floor": -2.0, "die_die": -7.0, "dice_shake": -5.0,
 	"stone_place": -4.0, "stone_stone": -4.0, "stone_lift": -22.0, "stone_slide": -8.0,
 	"date_pick": -20.0, "pit_drop": -15.0,
+	"cloth_move": -14.0, "hand_wood": -16.0, "hand_leather": -18.0,
+	"chew": -18.0, "sniff": -16.0, "nose_out": -22.0,
 }
 
 const DIE_SHADER := """
@@ -771,6 +774,11 @@ func update_clouds(delta: float) -> void:
 				cloud_to = cloud_thick                           # cloud comes over
 				cloud_wait = randf_range(20.0, 60.0)             # time in shade
 			cloud_t = 0.0
+			# a cloud's edge brings its own wind: a gust comes up as the light changes,
+			# harder under a thicker cloud, and dies away once the edge has gone over
+			if amb:
+				amb.gust(lerpf(0.6, 1.0, (cloud_thick - 0.75) / 0.25) * randf_range(0.85, 1.0),
+					CLOUD_EDGE_TIME * randf_range(0.5, 0.8), randf_range(1.5, 4.0), randf_range(5.0, 9.0))
 	# a cloud is never perfectly even: its thickness drifts a little while it passes
 	var wobble := 1.0 - 0.12 * cloud_cover * (0.5 + 0.5 * sin(Time.get_ticks_msec() * 0.00031))
 	apply_cloud(clampf(cloud_cover * wobble, 0.0, 1.0))
@@ -2087,7 +2095,10 @@ func eat_date() -> void:
 ## He chews a while, then his hand comes back with the stone and puts it down on the sand
 ## beside the bowl.
 func spit_stone(wait := -1.0) -> void:
-	await get_tree().create_timer(randf_range(chew.x, chew.y) if wait < 0.0 else wait).timeout
+	var chewing := randf_range(chew.x, chew.y) if wait < 0.0 else wait
+	if amb:
+		amb.chew(chewing)
+	await get_tree().create_timer(chewing).timeout
 	var h := lhand
 	var spot := bowl.pit_spot()
 	var pit := bowl.make_pit()
@@ -3284,7 +3295,7 @@ func _physics_process(delta: float) -> void:
 func build_audio() -> void:
 	for name in SFX_DB:
 		var arr: Array = []
-		for v in 8:
+		for v in 12:
 			var path := "res://assets/sfx/%s_%d.wav" % [name, v]
 			if ResourceLoader.exists(path):
 				arr.append(load(path))
@@ -3296,6 +3307,24 @@ func build_audio() -> void:
 		p.panning_strength = 0.6
 		add_child(p)
 		sfx_pool.append(p)
+	# the air, the cloth they wear, and Al-Khasm himself (see Ambience)
+	amb = Ambience.new(play_sfx, ground_under, MOUTH)
+	add_child(amb)
+	amb.add_hand(hands[HUMAN], -3.0, true)
+	amb.add_hand(hands[AI], 0.0, true)
+	amb.add_hand(lhand, -2.0, false, false)
+
+
+## What lies under a point of the table: Vector2(its height, Ambience.SAND / WOOD / LEATHER).
+func ground_under(p: Vector3) -> Vector2:
+	if TRAY.has_point(tray_local(p)):
+		return Vector2(grip.floor_y, Ambience.LEATHER)
+	for r in _room_rects():
+		var q: Vector3 = (r[0] as Transform3D) * p
+		var half: Vector2 = r[1]
+		if absf(q.x) <= half.x and absf(q.z) <= half.y:
+			return Vector2(float(r[2]), Ambience.WOOD)
+	return Vector2(0.0, Ambience.SAND)
 
 
 ## Play a random variant of a sound at a world position.

@@ -75,6 +75,7 @@ var last_vel := Vector3.ZERO
 var swing_live := false
 var aim_yaw := 0.0               # turn of the hand about the vertical, degrees (e.g. to line up with a die)
 var solid := Callable()          # (T, hand) -> world push keeping the hand out of solid things
+var elbow := Vector3.ZERO        # where the elbow is (world)
 var bump := Vector3.ZERO         # how far the last placement was pushed out of them (world)
 var room := Callable()           # (T, hand) -> how much room (world) the hand, and what it holds, has to
                                  # move level or upward; without it the hand keeps dead still
@@ -1991,6 +1992,7 @@ func _solve_arm() -> void:
 					hi = t
 			pole = pole.slerp(up_p, hi)
 			E = C + pole * h
+	elbow = E
 	var inv := global_transform.basis.inverse()
 	var fa: int = bones["forearm"]
 	var ua: int = bones["upperarm"]
