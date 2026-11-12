@@ -1,5 +1,5 @@
 extends SceneTree
-# Al-Khasm's bowl of dates: close views of the bowl and the dates in it, and of him eating.
+# Vidur's bowl of dates: close views of the bowl and the dates in it, and of him eating.
 # SHOT_DIR = output folder, VIEW = one of the names below (one capture per run: macOS stops
 # redrawing a covered window after a few frames), TAG = suffix for the file name.
 # EAT = how many dates he eats first (instantly, with their stones spat out beside the bowl).

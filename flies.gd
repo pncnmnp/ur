@@ -1,6 +1,6 @@
 class_name Flies
 extends Node3D
-## Houseflies, drawn to Al-Khasm's bowl of dates and to the sticky stones he spits out
+## Houseflies, drawn to Vidur's bowl of dates and to the sticky stones he spits out
 ## beside it.
 ##
 ## A fly is life size (about 7 mm long, a speck from where you sit): a dark grey thorax,
@@ -16,7 +16,7 @@ extends Node3D
 ## slow, lazy one gets much nearer. Startled, it shoots away, circles, and mostly comes
 ## straight back; now and then it gives up for a while and goes off out of sight.
 ##
-## sitting() tells the game which flies are sat where, and for how long, so Al-Khasm can
+## sitting() tells the game which flies are sat where, and for how long, so Vidur can
 ## decide whether to bother shooing them.
 
 const CM := 0.21

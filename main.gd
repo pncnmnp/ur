@@ -37,7 +37,7 @@ const DICE_CALL_TIME := 2.0  # after this many seconds, creeping dice are called
 const HOME_X := 5.15
 const DRAG_LEAN_CM := 5.0   # how far the human leans in while carrying a stone with the mouse
 const HOME_SIZE := Vector2(1.7, 2.8)  # home plate (x, z); finished stones sit on it side by side
-const BOWL_POS := Vector3(4.3, -0.04, -4.55)   # Al-Khasm's bowl of dates, behind his home plate
+const BOWL_POS := Vector3(4.3, -0.04, -4.55)   # Vidur's bowl of dates, behind his home plate
 const DATES := 12                              # how many dates are in it: when they are gone, they are gone
 
 enum Phase { ROLL, MOVE, BUSY, OVER }
@@ -87,7 +87,7 @@ var load_button: Button
 var turn_state: UrGame              # the position as the current turn began (or the next one will): what a save keeps
 const SAVE_PATH := "user://ur_save.json"
 const SETTINGS_PATH := "user://ur_settings.cfg"
-var ai_level := 1                   # Al-Khasm's strength: index into UrAI.LEVELS
+var ai_level := 1                   # Vidur's strength: index into UrAI.LEVELS
 # the clay tablet the game's messages are scratched into
 var tablet_mat: ShaderMaterial
 var tablet_label: Label
@@ -893,7 +893,7 @@ func build_board() -> void:
 		add_slab(HOME_SIZE, plate_xf(p), slab_mat, panel_mat("plate"), "plate", yaw)
 
 
-## Al-Khasm's bowl of dates, on the sand behind his home plate (on his left).
+## Vidur's bowl of dates, on the sand behind his home plate (on his left).
 func build_bowl() -> void:
 	bowl = DateBowl.new(DATES)
 	bowl.position = BOWL_POS
@@ -1569,7 +1569,7 @@ func build_ui() -> void:
 	load_button = corner_link(root, "load game", 2, load_game)
 	load_button.disabled = not FileAccess.file_exists(SAVE_PATH)
 
-	# below them: Al-Khasm's strength, as one, two or three wedges
+	# below them: Vidur's strength, as one, two or three wedges
 	var cfg := ConfigFile.new()
 	if cfg.load(SETTINGS_PATH) == OK:
 		ai_level = clampi(int(cfg.get_value("ai", "level", ai_level)), 0, UrAI.LEVELS.size() - 1)
@@ -1764,7 +1764,7 @@ func start_turn() -> void:
 		snack_while_waiting(e)
 	else:
 		phase = Phase.BUSY
-		set_status("Al-Khasm's turn")
+		set_status("Vidur's turn")
 		await get_tree().create_timer(0.7).timeout
 		if e != epoch:
 			return
@@ -1801,7 +1801,7 @@ func do_roll() -> void:
 	roll = 0
 	for r in dice_result:
 		roll += r
-	var who := "You" if game.current == HUMAN else "Al-Khasm"
+	var who := "You" if game.current == HUMAN else "Vidur"
 	legal = game.legal_moves(game.current, roll)
 	if legal.is_empty():
 		set_status("%s threw %d\nno move" % [who, roll])
@@ -1815,7 +1815,7 @@ func do_roll() -> void:
 		phase = Phase.MOVE
 		set_status("You threw %d\nmove a stone %d" % [roll, roll])
 	else:
-		set_status("Al-Khasm threw %d" % roll)
+		set_status("Vidur threw %d" % roll)
 		await get_tree().create_timer(0.8).timeout
 		if e != epoch:
 			return
@@ -1827,7 +1827,7 @@ func perform_move(idx: int) -> void:
 	var e := epoch
 	var p := game.current
 	var h: UrHand = hands[p]
-	var who := "You" if p == HUMAN else "Al-Khasm"
+	var who := "You" if p == HUMAN else "Vidur"
 	var src: int = game.pos[p][idx]
 	var dst := src + roll
 	var node: Node3D = pnodes[p][idx]
@@ -1916,10 +1916,10 @@ func perform_move(idx: int) -> void:
 		msg = "%s captured a stone" % who
 	if game.has_won(p):
 		phase = Phase.OVER
-		set_status("You win!" if p == HUMAN else "Al-Khasm wins")
+		set_status("You win!" if p == HUMAN else "Vidur wins")
 		return
 	if r.extra_turn:
-		msg = "Rosette\n%s again" % ("you throw" if p == HUMAN else "Al-Khasm throws")
+		msg = "Rosette\n%s again" % ("you throw" if p == HUMAN else "Vidur throws")
 	set_status(msg)
 	await get_tree().create_timer(0.8).timeout
 	if e != epoch:
@@ -1930,7 +1930,7 @@ func perform_move(idx: int) -> void:
 
 
 # ======================================================================
-# Al-Khasm's dates
+# Vidur's dates
 # ======================================================================
 
 ## Whether he takes a date now, with the given chance: only if there are any left, his
@@ -2555,7 +2555,7 @@ func can_slide(p: int, src: int, dst: int) -> bool:
 
 var hands: Array = [null, null]
 var bowl: DateBowl
-var lhand: UrHand                   # Al-Khasm's left hand: it takes his dates
+var lhand: UrHand                   # Vidur's left hand: it takes his dates
 var eating := false                 # he is taking a date to his mouth: his game waits for it
 var left_busy := false              # his left hand is about something (a date, or putting its stone down)
 var snack_ok := true                # (the tests turn his snacking off)
@@ -3483,7 +3483,7 @@ func build_audio() -> void:
 		p.panning_strength = 0.6
 		add_child(p)
 		sfx_pool.append(p)
-	# the air, the cloth they wear, and Al-Khasm himself (see Ambience)
+	# the air, the cloth they wear, and Vidur himself (see Ambience)
 	amb = Ambience.new(play_sfx, ground_under, MOUTH)
 	add_child(amb)
 	amb.add_hand(hands[HUMAN], -3.0, true)

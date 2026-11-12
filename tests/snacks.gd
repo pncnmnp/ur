@@ -1,5 +1,5 @@
 extends SceneTree
-# Al-Khasm's dates over a whole game, sped up (headless is fine): you play the first legal
+# Vidur's dates over a whole game, sped up (headless is fine): you play the first legal
 # move each turn after a pause, he plays and helps himself to dates on both turns. Checks
 # that the dates only ever run down, never below zero, that each one eaten leaves a stone
 # by the bowl, that he never plays (throws or moves) while a date is on its way to his

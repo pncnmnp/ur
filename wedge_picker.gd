@@ -1,6 +1,6 @@
 class_name WedgePicker
 extends Control
-## Al-Khasm's strength, chosen by pressing one of three cuneiform wedges into
+## Vidur's strength, chosen by pressing one of three cuneiform wedges into
 ## the corner: one, two or three wedges, the way a scribe wrote 1, 2 and 3.
 ## Sits faint under the corner links like they do, and brightens under the mouse.
 

@@ -1,6 +1,6 @@
 class_name DateBowl
 extends Node3D
-## An old earthen bowl of dates beside Al-Khasm, and the stones he spits out of them.
+## An old earthen bowl of dates beside Vidur, and the stones he spits out of them.
 ##
 ## The bowl is wheel-thrown desert clay, unglazed and open-fired: wide and shallow, an open
 ## bowl a hand can reach anywhere in, on a low foot, with flaring walls

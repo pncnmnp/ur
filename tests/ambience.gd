@@ -1,5 +1,5 @@
 extends SceneTree
-# Ambience check (numbers only): plays a few turns while a cloud comes over and Al-Khasm
+# Ambience check (numbers only): plays a few turns while a cloud comes over and Vidur
 # eats a date, and reports what was heard: how hard it gusted and how loud each loop got,
 # every one-shot by name, and whether the 24 s wind loop is still going after 30 s.
 func _init() -> void:

@@ -9,7 +9,7 @@ extends Node
 ## - Cloth. A sleeve rustles as its arm moves, as loudly as the arm is fast; a robe
 ##   shifts as its wearer leans in to reach; a hem dragged over the sand hisses.
 ## - Skin. A hand coming to rest on the tray's rim or its leather floor pats it softly.
-## - Al-Khasm, out of sight: he chews his dates, breathes out through his nose with his
+## - Vidur, out of sight: he chews his dates, breathes out through his nose with his
 ##   mouth full, and sniffs now and then.
 ##
 ## All of it is quiet: it is there to be missed if it stopped, not to be listened to.

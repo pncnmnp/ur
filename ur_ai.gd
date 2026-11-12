@@ -5,7 +5,7 @@ extends RefCounted
 const PROBS := [1.0 / 16, 4.0 / 16, 6.0 / 16, 4.0 / 16, 1.0 / 16]
 const WIN := 10000.0
 
-## Al-Khasm's strengths, weakest first.
+## Vidur's strengths, weakest first.
 const LEVELS := ["novice", "scribe", "master"]
 
 

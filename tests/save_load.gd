@@ -1,6 +1,6 @@
 extends SceneTree
 # Save a mid-game position, scramble the board, load it back: the rules state and every
-# stone must come back as saved, with Al-Khasm's turn resumed. Screenshots the loaded table.
+# stone must come back as saved, with Vidur's turn resumed. Screenshots the loaded table.
 # The player's own save slot is kept aside and put back afterwards.
 func _init() -> void:
 	var out: String = OS.get_environment("SHOT_DIR")
@@ -24,7 +24,7 @@ func _init() -> void:
 	m.load_game()
 	await process_frame
 	assert(m.game.pos == g.pos, "loaded position differs: %s" % [m.game.pos])
-	assert(m.game.current == 1, "should be Al-Khasm's turn")
+	assert(m.game.current == 1, "should be Vidur's turn")
 	for p in 2:
 		var k := 0
 		for i in 7:

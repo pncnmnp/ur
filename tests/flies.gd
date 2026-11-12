@@ -1,5 +1,5 @@
 extends SceneTree
-# The flies round Al-Khasm's dates, sped up (headless is fine): with a few date stones
+# The flies round Vidur's dates, sped up (headless is fine): with a few date stones
 # already spat out by the bowl and nothing else going on, watch the flies come and go and
 # him shoo them. Checks that flies land both in the bowl and on the stones; that he flicks
 # a fly off his dates quickly (within ~1.5 s of it sitting) but leaves one on the stones a

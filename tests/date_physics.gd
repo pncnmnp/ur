@@ -1,5 +1,5 @@
 extends SceneTree
-# Al-Khasm's bowl as solid things (headless is fine). The dates settle at the start without
+# Vidur's bowl as solid things (headless is fine). The dates settle at the start without
 # flying about; then he eats EAT dates (default 6), one after another (stones and all),
 # and every physics step checks: no part of his hand or sleeve inside the clay; no date
 # squeezed into the clay or into another more than soft fruit gives under a finger, and
