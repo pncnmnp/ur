@@ -101,6 +101,7 @@ var sfx := {}
 var sfx_pool: Array = []
 var sfx_next := 0
 var amb: Ambience                   # the wind, their sleeves, his chewing
+var traces: Traces                  # what has been pressed into the sand and wiped off the wood
 var die_prev_v: Array = []
 var die_prev_w: Array = []
 var die_cool: Array = [0.0, 0.0, 0.0, 0.0]
@@ -233,6 +234,11 @@ uniform float rect_top[8];   // world height of each object's top
 uniform int rect_count = 0;
 uniform float tile = 4.0;
 uniform vec2 wind = vec2(0.94, 0.34);   // the way the wind blows (xz, unit)
+// what has been pressed into the sand since the wind last smoothed it (see traces.gd):
+// r = how far down (-) or heaped up (+), in world units, over marks_area (corner, size)
+uniform sampler2D marks_tex : filter_linear, repeat_disable;
+uniform vec4 marks_area = vec4(0.0, 0.0, 1.0, 1.0);
+uniform vec2 marks_px = vec2(0.001);
 varying vec3 wp;
 varying float drift;         // how much of this sand is drifted against something (0..1)
 
@@ -329,11 +335,31 @@ void fragment() {
 	float d = max(nearest(wp.xz).x, 0.0);
 	float crease = 1.0 - smoothstep(0.0, 0.06, d);
 	col *= 1.0 - 0.38 * crease * crease;
+	// marks: the low sun picks out their slopes; pressed sand is packed smooth, its ripples
+	// gone, and a shade darker; what was pushed up beside it is loose and a shade paler
+	vec2 muv = (wp.xz - marks_area.xy) / marks_area.zw;
+	float press = 0.0;
+	float mao = 1.0;
+	if (muv.x > 0.0 && muv.x < 1.0 && muv.y > 0.0 && muv.y < 1.0) {
+		// (slopes taken between the pixels, a pixel and a half apart: each tap is then the
+		// mean of four, and the picture's own grid does not show in the light)
+		vec2 e = marks_px * 1.5;
+		float h00 = texture(marks_tex, muv + vec2(-e.x, -e.y)).r;
+		float h10 = texture(marks_tex, muv + vec2(e.x, -e.y)).r;
+		float h01 = texture(marks_tex, muv + vec2(-e.x, e.y)).r;
+		float h11 = texture(marks_tex, muv + vec2(e.x, e.y)).r;
+		vec2 slope = vec2(h10 + h11 - h00 - h01, h01 + h11 - h00 - h10) / (4.0 * e * marks_area.zw);
+		float mh = 0.25 * (h00 + h10 + h01 + h11);
+		NORMAL = normalize(NORMAL - (VIEW_MATRIX * vec4(slope.x, 0.0, slope.y, 0.0)).xyz * 1.6);
+		press = clamp(-mh / 0.03, 0.0, 1.0);
+		col *= 1.0 - 0.09 * press + 0.05 * clamp(mh / 0.015, 0.0, 1.0);
+		mao = 1.0 - 0.3 * press;
+	}
 	ALBEDO = col;
-	AO = 1.0 - 0.7 * (1.0 - smoothstep(0.0, 0.16, d));
+	AO = (1.0 - 0.7 * (1.0 - smoothstep(0.0, 0.16, d))) * mao;
 	AO_LIGHT_AFFECT = 0.45;
 	NORMAL_MAP = texture(nrm_tex, uv).rgb;
-	NORMAL_MAP_DEPTH = mix(1.0, 0.25, dr);
+	NORMAL_MAP_DEPTH = mix(1.0, 0.25, dr) * (1.0 - 0.75 * press);
 	ROUGHNESS = 0.94;
 	SPECULAR = 0.3;
 }
@@ -345,6 +371,8 @@ func _ready() -> void:
 	ui_font.font_names = PackedStringArray(["Copperplate", "Optima", "Georgia"])
 	ui_font.font_weight = 700
 	build_environment()
+	traces = Traces.new()
+	add_child(traces)
 	build_board()
 	build_bowl()
 	build_tray()
@@ -449,14 +477,21 @@ func add_slab(size: Vector2, xf: Transform3D, slab_mat: Material, panel: Materia
 	root.add_child(slab)
 	var top := add_plane(size - Vector2(2, 2) * SLAB_R, Vector3(0, BY, 0), panel, yaw, root)
 	top.layers = 1 | DUSTED
-	add_dust(dust, root, Vector3(size.x + 0.02, 0.24, size.y + 0.02), Vector3(0, BY, 0))
+	add_dust(dust, root, Vector3(size.x + 0.02, 0.24, size.y + 0.02), Vector3(0, BY, 0), [slab, top])
 
 
 ## Wind-blown sand lying on a piece of wood or clay (assets/dust_<name>.png, made by
 ## tools/make_dust.py): a decal over its top, `size` (x, height, z) centred at `at` in
 ## `parent`'s frame. It settles only on surfaces in the DUSTED layer - the board, strips,
 ## plates, tray and tablet - never on the stones, dice or hands moving over them.
-func add_dust(name: String, parent: Node3D, size: Vector3, at: Vector3) -> void:
+## Given the meshes it lies `on`, it is drawn over them instead, and stones and sleeves
+## drawn across it wipe it off, until it settles again (see Traces).
+func add_dust(name: String, parent: Node3D, size: Vector3, at: Vector3, on: Array = []) -> void:
+	if not on.is_empty():
+		var dm := traces.dust_material(tex("res://assets/dust_%s.png" % name), parent.transform, at, Vector2(size.x, size.z))
+		for mi in on:
+			(mi as GeometryInstance3D).material_overlay = dm
+		return
 	var dc := Decal.new()
 	dc.texture_albedo = tex("res://assets/dust_%s.png" % name)
 	dc.size = size
@@ -663,11 +698,12 @@ func die_radius(d: Vector3, nrm: Array) -> float:
 # ======================================================================
 
 func build_environment() -> void:
-	var sky_mat := ProceduralSkyMaterial.new()
-	# late-afternoon desert sky: deep blue overhead, warm hazy horizon
-	sky_mat.sky_top_color = Color(0.26, 0.4, 0.66)
-	sky_mat.sky_horizon_color = Color(0.86, 0.68, 0.5)
-	sky_mat.ground_horizon_color = Color(0.78, 0.6, 0.42)
+	sky_mat = ProceduralSkyMaterial.new()
+	# late-afternoon desert sky: deep blue overhead, warm hazy horizon (and getting later:
+	# see update_day)
+	sky_mat.sky_top_color = SKY_TOP[0]
+	sky_mat.sky_horizon_color = SKY_HORIZON[0]
+	sky_mat.ground_horizon_color = GROUND_HORIZON[0]
 	sky_mat.ground_bottom_color = Color(0.55, 0.4, 0.26)
 	sky_mat.sun_angle_max = 20.0
 	var sky := Sky.new()
@@ -698,7 +734,7 @@ func build_environment() -> void:
 	# (no SSIL: SDFGI already gives the bounce light; SSIL on top cost ~5% of the frame
 	# for no visible difference)
 	env.fog_enabled = true # faint heat haze toward the far edge
-	env.fog_light_color = Color(0.9, 0.72, 0.52)
+	env.fog_light_color = HAZE[0]
 	env.fog_density = 0.004
 	env.fog_sky_affect = 0.0
 	world_env = env
@@ -709,8 +745,8 @@ func build_environment() -> void:
 	# low, warm late-afternoon sun from the front left: long shadows rake across
 	# the grain, the carving, the leather and the sand ripples
 	sun = DirectionalLight3D.new()
-	sun.rotation_degrees = Vector3(-24, -66, 0)
-	sun.light_color = Color(1.0, 0.8, 0.58)
+	sun.rotation_degrees = Vector3(SUN_FROM.x, SUN_FROM.y, 0)
+	sun.light_color = SUN_COLOR[0]
 	sun.light_energy = SUN_ENERGY
 	sun.light_angular_distance = SUN_ANGLE
 	sun.shadow_enabled = true
@@ -785,9 +821,51 @@ func update_clouds(delta: float) -> void:
 
 
 func apply_cloud(c: float) -> void:
-	sun.light_energy = SUN_ENERGY * lerpf(1.0, CLOUD_SUN, c)
+	sun.light_energy = SUN_ENERGY * day_dim * lerpf(1.0, CLOUD_SUN, c)
 	sun.light_angular_distance = lerpf(SUN_ANGLE, 6.0, c)     # diffuse light: soft shadows
 	world_env.ambient_light_energy = SKY_ENERGY * lerpf(1.0, 1.35, c)
+
+
+## The afternoon wears on while they play. The sun sinks and swings round a few degrees,
+## so every shadow on the table grows longer and turns a little; its light comes through
+## more air, so it warms and weakens a touch, and the haze at the horizon warms with it.
+## Far too slowly to see happening (the sun moves its own width in two minutes): the table
+## only looks different, after a long game, from how it looked when they sat down. It
+## never gets to sunset: the later it is, the slower it goes (DAY_SPAN: about two thirds
+## of the way in this many seconds). It is the sitting that is timed, not the game: a new
+## game, or a loaded one, goes on in the same afternoon.
+const DAY_SPAN := 2700.0
+const SUN_FROM := Vector2(-24.0, -66.0)     # the sun's height and bearing (degrees) as they sit down
+const SUN_TO := Vector2(-11.5, -74.0)       # and where it is heading
+const SUN_COLOR := [Color(1.0, 0.8, 0.58), Color(1.0, 0.63, 0.36)]
+const SKY_TOP := [Color(0.26, 0.4, 0.66), Color(0.22, 0.32, 0.6)]
+const SKY_HORIZON := [Color(0.86, 0.68, 0.5), Color(0.93, 0.6, 0.36)]
+const GROUND_HORIZON := [Color(0.78, 0.6, 0.42), Color(0.82, 0.54, 0.32)]
+const HAZE := [Color(0.9, 0.72, 0.52), Color(0.94, 0.62, 0.38)]
+const SKY_EVERY := 20.0         # (s) between repaintings of the sky (it lights the scene, so not every frame)
+var day_time := 0.0             # seconds they have sat at the table
+var day_dim := 1.0              # how much of its first strength the sun still has
+var sky_wait := 0.0
+var sky_mat: ProceduralSkyMaterial
+
+
+func day_part() -> float:
+	return 1.0 - exp(-day_time / DAY_SPAN)
+
+
+func update_day(delta: float) -> void:
+	day_time += delta
+	var k := day_part()
+	sun.rotation_degrees = Vector3(lerpf(SUN_FROM.x, SUN_TO.x, k), lerpf(SUN_FROM.y, SUN_TO.y, k), 0.0)
+	sun.light_color = (SUN_COLOR[0] as Color).lerp(SUN_COLOR[1], k)
+	day_dim = lerpf(1.0, 0.84, k)        # (update_clouds, next, sets the sun's strength from it)
+	sky_wait -= delta
+	if sky_wait <= 0.0:
+		sky_wait = SKY_EVERY
+		sky_mat.sky_top_color = (SKY_TOP[0] as Color).lerp(SKY_TOP[1], k)
+		sky_mat.sky_horizon_color = (SKY_HORIZON[0] as Color).lerp(SKY_HORIZON[1], k)
+		sky_mat.ground_horizon_color = (GROUND_HORIZON[0] as Color).lerp(GROUND_HORIZON[1], k)
+		world_env.fog_light_color = (HAZE[0] as Color).lerp(HAZE[1], k)
 
 
 func build_board() -> void:
@@ -851,6 +929,9 @@ func build_sand() -> void:
 	sm.set_shader_parameter("rect_top", PackedFloat32Array([BY, BY, BY, BY, BY, TRAY_RIM_H, TABLET_POS.y + 0.06, 0.16]))
 	sm.set_shader_parameter("rect_count", rects.size())
 	sm.set_shader_parameter("wind", SAND_WIND)
+	sm.set_shader_parameter("marks_tex", traces.texture())
+	sm.set_shader_parameter("marks_area", Vector4(Traces.AREA.position.x, Traces.AREA.position.y, Traces.AREA.size.x, Traces.AREA.size.y))
+	sm.set_shader_parameter("marks_px", Vector2.ONE / (Traces.AREA.size * Traces.PPU))
 	var mi := MeshInstance3D.new()
 	# 9 cm near the table, 24 cm beyond: half as fine as it was (4.5 / 12 cm), which cost
 	# ~20% of the frame for drifts that only differ when zoomed right in
@@ -1617,6 +1698,7 @@ func set_up(g: UrGame) -> void:
 	human_holding = false
 	release_pending = null
 	carried.clear()
+	trace_stone.clear()        # (the stones are about to be put in their places, not pushed there)
 	for h in hands:
 		h.move_id += 1
 		h.shake = Vector3.ZERO
@@ -2128,7 +2210,7 @@ func spit_stone(wait := -1.0) -> void:
 	var from := pit.global_transform
 	var rest_b := (Basis(Vector3.UP, randf() * TAU) * Basis(Vector3.BACK, randf_range(-0.6, 0.6) + (PI if randf() < 0.5 else 0.0))) \
 		.scaled(Vector3.ONE * DateBowl.CM)
-	var to := Transform3D(rest_b, spot + Vector3(0, float(pit.get_meta("half_h")) * DateBowl.CM, 0))
+	var to := Transform3D(rest_b, spot + Vector3(0, float(pit.get_meta("half_h")) * DateBowl.CM - PIT_BED, 0))
 	var tw := create_tween()
 	tw.tween_method(func(t: float) -> void:
 		var q := from.interpolate_with(to, t)
@@ -2138,6 +2220,9 @@ func spit_stone(wait := -1.0) -> void:
 	await tw.finished
 	play_sfx("pit_drop", spot)
 	pits.append(pit)
+	# it beds itself in the sand where it fell, a little sand thrown up round it
+	var lie := rest_b.z.normalized() * 0.11
+	traces.press(spot - lie, spot + lie, 0.125, 0.03, 0.011, "pit")
 	await get_tree().create_timer(0.12).timeout
 	h.pose_rate = 9.0
 	h.set_pose("relaxed")
@@ -2145,6 +2230,97 @@ func spit_stone(wait := -1.0) -> void:
 	h.visible = false
 	h.grip_override = null
 	left_busy = false
+
+
+# ======================================================================
+# The marks they leave (kept, and slowly undone, by Traces)
+# ======================================================================
+
+const PIT_BED := 0.02           # how far a date stone sinks into the sand it is dropped on
+const SLEEVE_HALF := 0.3        # half the width of the fold of sleeve that drags (~3 cm in all)
+var trace_stone := {}           # stone -> where it last lay on wood (null: it is off it)
+var trace_arm := {}             # hand -> where the three parts of its sleeve last left a mark (or null)
+var trace_skin := {}            # hand -> {part of it -> where that last pressed the sand, and how deep (y)}
+
+
+## Every frame: what is touching the sand or the dusty wood just now marks it.
+## - A stone pushed along the wood wipes its dust off in a streak, most of it banked along
+##   the streak's edges; one set down from the air only disturbs the dust it lands on.
+## - A sleeve hanging low enough to drag (the same folds that are heard: Ambience) leaves
+##   a broad shallow trail in the sand, and takes a little dust off wood it is drawn over.
+## - A hand that comes down on the sand - the heel of it, a knuckle, fingertips - presses
+##   its own shape in, as deep as it went.
+func leave_traces() -> void:
+	for p in 2:
+		for n in pnodes[p]:
+			var at: Vector3 = (n as Node3D).position
+			var g := ground_under(at)
+			if int(g.y) != Ambience.WOOD or at.y - PIECE_H / 2.0 > g.x + 0.03:
+				trace_stone[n] = null
+				continue
+			if not trace_stone.has(n):
+				trace_stone[n] = at          # (where it lay when the game was set out)
+				continue
+			var was: Variant = trace_stone[n]
+			if was == null:
+				traces.wipe(at, at, PIECE_R * 0.6, 0.32, 0.0, "stone set down")
+			elif Vector2(at.x - was.x, at.z - was.z).length() < 0.02:
+				continue
+			else:
+				traces.wipe(was, at, PIECE_R * 0.82, 0.88, 0.3, "stone pushed")
+			trace_stone[n] = at
+	for h in hands + [lhand]:
+		if h == null or not h.visible:
+			trace_arm.erase(h)
+			trace_skin.erase(h)
+			continue
+		var w: Vector3 = h.global_position
+		var along: Vector3 = h.elbow - w
+		if along.length() > 0.01:
+			var dir := along.normalized()
+			var hang := Ambience.HANG_CM * UrHand.CM * (1.0 - absf(dir.y))
+			if not trace_arm.has(h):
+				trace_arm[h] = [null, null, null]
+			var last: Array = trace_arm[h]
+			for i in 3:
+				var q: Vector3 = w + dir * ((7.0 + 6.0 * i) * UrHand.CM)
+				var g := ground_under(q)
+				var t := clampf(1.0 - (q.y - hang - g.x) / (2.5 * UrHand.CM), 0.0, 1.0)
+				if t < 0.3 or int(g.y) == Ambience.LEATHER:
+					last[i] = null
+					continue
+				var from: Vector3 = q if last[i] == null else last[i]
+				if last[i] != null and Vector2(q.x - from.x, q.z - from.z).length() < 0.06:
+					continue
+				if int(g.y) == Ambience.SAND:
+					traces.press(from, q, SLEEVE_HALF, 0.008 + 0.014 * t, 0.004, "sleeve on sand")
+				else:
+					traces.wipe(from, q, SLEEVE_HALF, 0.24 * t, 0.0, "sleeve on wood")
+				last[i] = q
+		if w.y > 2.5:
+			trace_skin.erase(h)
+			continue
+		if not trace_skin.has(h):
+			trace_skin[h] = {}
+		var skin: Dictionary = trace_skin[h]
+		var balls: Array = bowl.hand_balls(h.global_transform, h)
+		for k in balls.size() - 4:                 # (the last four are the wrist and the sleeve)
+			var c: Vector3 = balls[k][0]
+			var r: float = balls[k][1]
+			var deep := 0.015 - (c.y - r)           # (loose sand gives under less than a touch)
+			if deep <= 0.0 or int(ground_under(c).y) != Ambience.SAND:
+				skin.erase(k)
+				continue
+			deep = minf(deep, 0.07)
+			var half := maxf(sqrt(maxf(r * r - maxf(c.y, 0.0) * maxf(c.y, 0.0), 0.0)), 0.5 * r) + 0.03
+			if skin.has(k):
+				var o: Vector3 = skin[k]
+				if Vector2(c.x - o.x, c.z - o.z).length() < 0.04 and deep < o.y + 0.006:
+					continue
+				traces.press(Vector3(o.x, 0, o.z), c, half, deep, 0.3 * deep, "hand on sand")
+			else:
+				traces.press(c, c, half, deep, 0.3 * deep, "hand on sand")
+			skin[k] = Vector3(c.x, deep, c.z)
 
 
 # ======================================================================
@@ -3502,7 +3678,9 @@ func _release_held(pt: Vector2) -> void:
 
 func _process(delta: float) -> void:
 	pace_frames(delta)
+	update_day(delta)
 	update_clouds(delta)
+	leave_traces()
 	watch_flies(delta)
 	if dragging and human_holding and sel_idx != -1:
 		# the stone in the human's fingers follows the mouse, with a hand's slight lag
