@@ -2,7 +2,8 @@
 # Build the macOS app: build/macos/Royal Game of Ur.app
 # Needs Godot 4.7.2 export templates installed (Editor > Manage Export Templates).
 set -euo pipefail
-GODOT="${GODOT:-/Users/parth/Downloads/Godot.app/Contents/MacOS/Godot}"
+# Set GODOT to use a Godot binary that is not in /Applications.
+GODOT="${GODOT:-/Applications/Godot.app/Contents/MacOS/Godot}"
 ROOT="${0:A:h}"
 OUT="$ROOT/build/macos"
 NAME="Royal Game of Ur"

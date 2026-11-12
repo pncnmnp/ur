@@ -115,7 +115,7 @@ The [tools/make_sounds.py](tools/make_sounds.py) script makes many of them.
    ./build_macos.sh
    ```
 
-The app goes in `build/macos/Royal Game of Ur.app`. Set `GODOT` if Godot is not in `~/Downloads`.
+The app goes in `build/macos/Royal Game of Ur.app`. Set `GODOT` if Godot is not in `/Applications`.
 
 ## Files
 
